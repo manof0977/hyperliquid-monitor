@@ -3,6 +3,7 @@ import logging
 import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.error import Conflict, NetworkError
 from config import TELEGRAM_BOT_TOKEN, CHECK_INTERVAL
 from database import init_db, add_wallet, remove_wallet, get_wallets_by_chat
 from monitor import monitor_loop, fetch_positions, fetch_open_orders
@@ -60,7 +61,8 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if success:
         label_text = f" (*{label}*)" if label else ""
         await update.message.reply_text(
-            f"✅ Now monitoring:\n`{address}`{label_text}",
+            f"✅ Now monitoring:\n`{address}`{label_text}\n\n"
+            f"You will only receive notifications for NEW trades from now!",
             parse_mode="Markdown"
         )
     else:
@@ -217,13 +219,10 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def main():
-    # Initialize database
     await init_db()
 
-    # Build application
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Register all command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("add", add_command))
@@ -232,22 +231,22 @@ async def main():
     app.add_handler(CommandHandler("positions", positions_command))
     app.add_handler(CommandHandler("orders", orders_command))
 
-    # Initialize and start the app
     await app.initialize()
     await app.start()
 
-    # Start polling for telegram updates
-    await app.updater.start_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES
-    )
+    # ✅ This clears any old webhook or polling conflicts
+    await app.bot.delete_webhook(drop_pending_updates=True)
 
     logger.info("✅ Bot started successfully!")
 
-    # Start the wallet monitor loop (runs forever)
+    await app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+        error_callback=lambda error: logger.error(f"Polling error: {error}")
+    )
+
     await monitor_loop(app.bot)
 
-    # Cleanup on exit
     await app.updater.stop()
     await app.stop()
     await app.shutdown()
