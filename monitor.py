@@ -11,7 +11,12 @@ logger = logging.getLogger(__name__)
 async def fetch_trades(session, address):
     payload = {"type": "userFills", "user": address}
     try:
-        async with session.post(HYPERLIQUID_API, json=payload, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.post(
+            HYPERLIQUID_API,
+            json=payload,
+            headers=HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
             if resp.status == 200:
                 return await resp.json()
             return []
@@ -23,7 +28,12 @@ async def fetch_trades(session, address):
 async def fetch_positions(session, address):
     payload = {"type": "clearinghouseState", "user": address}
     try:
-        async with session.post(HYPERLIQUID_API, json=payload, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.post(
+            HYPERLIQUID_API,
+            json=payload,
+            headers=HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
             if resp.status == 200:
                 return await resp.json()
             return {}
@@ -35,7 +45,12 @@ async def fetch_positions(session, address):
 async def fetch_open_orders(session, address):
     payload = {"type": "openOrders", "user": address}
     try:
-        async with session.post(HYPERLIQUID_API, json=payload, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.post(
+            HYPERLIQUID_API,
+            json=payload,
+            headers=HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
             if resp.status == 200:
                 return await resp.json()
             return []
@@ -59,7 +74,10 @@ def format_trade_message(trade, address, label):
         usd_formatted = "N/A"
 
     timestamp = trade.get("time", 0)
-    trade_time = datetime.utcfromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S UTC')
+    trade_time = datetime.utcfromtimestamp(
+        timestamp / 1000
+    ).strftime('%Y-%m-%d %H:%M:%S UTC')
+
     wallet_display = label if label else f"{address[:6]}...{address[-4:]}"
 
     message = "🔔 *Trade Detected!*\n"
@@ -77,6 +95,28 @@ def format_trade_message(trade, address, label):
     return message
 
 
+async def initialize_wallet_time(session, address):
+    """
+    When a new wallet is added set its last trade time
+    to the most recent trade so we dont send old notifications
+    """
+    import time
+
+    # Get current time as default
+    current_time = int(time.time() * 1000)
+
+    try:
+        trades = await fetch_trades(session, address)
+        if trades:
+            # Get the most recent trade time
+            latest = max(t.get("time", 0) for t in trades)
+            return latest
+        else:
+            return current_time
+    except Exception:
+        return current_time
+
+
 async def check_wallet(session, address, chat_ids, labels, bot):
     still_monitored = await is_wallet_monitored(address)
     if not still_monitored:
@@ -88,6 +128,8 @@ async def check_wallet(session, address, chat_ids, labels, bot):
         return
 
     last_time = await get_last_trade_time(address)
+
+    # ✅ ONLY GET TRADES THAT HAPPENED AFTER WE STARTED MONITORING
     new_trades = [t for t in trades if t.get("time", 0) > last_time]
 
     if not new_trades:
@@ -148,7 +190,9 @@ async def monitor_loop(bot):
 
                     tasks = []
                     for addr, cids in wallet_map.items():
-                        task = check_wallet(session, addr, cids, label_map, bot)
+                        task = check_wallet(
+                            session, addr, cids, label_map, bot
+                        )
                         tasks.append(task)
 
                     await asyncio.gather(*tasks)
