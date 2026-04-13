@@ -1,7 +1,15 @@
 import aiosqlite
 import time
+import os
 
-DB_PATH = "wallets.db"
+# Use persistent volume on Railway
+# Falls back to local folder on PC
+if os.path.exists("/app/data"):
+    DB_PATH = "/app/data/wallets.db"
+else:
+    DB_PATH = "wallets.db"
+
+print(f"Database path: {DB_PATH}")
 
 
 async def init_db():
@@ -90,7 +98,6 @@ async def get_wallets_by_chat(chat_id: int):
 
 
 async def get_wallets_with_labels_by_chat(chat_id: int):
-    """Get all wallets for a chat with their labels"""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT address, label FROM wallets WHERE chat_id = ?",
