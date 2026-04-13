@@ -1,6 +1,8 @@
 import aiosqlite
+import time
 
 DB_PATH = "wallets.db"
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -21,6 +23,7 @@ async def init_db():
         """)
         await db.commit()
 
+
 async def add_wallet(chat_id: int, address: str, label: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         try:
@@ -30,24 +33,18 @@ async def add_wallet(chat_id: int, address: str, label: str = None):
             )
             await db.commit()
 
-            # ✅ SET LAST TRADE TIME TO RIGHT NOW
-            # This means bot will only look for trades AFTER this moment
-            import time
-            current_time = int(time.time() * 1000)  # milliseconds
-
-            # Check if this address already has a last_trade_time
+            current_time = int(time.time() * 1000)
             async with db.execute(
                 "SELECT last_trade_time FROM last_trades WHERE address = ?",
                 (address.lower(),)
             ) as cursor:
                 row = await cursor.fetchone()
 
-            # Only set current time if this wallet is brand new
             if not row:
-                await db.execute("""
-                    INSERT INTO last_trades (address, last_trade_time)
-                    VALUES (?, ?)
-                """, (address.lower(), current_time))
+                await db.execute(
+                    "INSERT INTO last_trades (address, last_trade_time) VALUES (?, ?)",
+                    (address.lower(), current_time)
+                )
                 await db.commit()
 
             return True
@@ -84,6 +81,16 @@ async def remove_wallet(chat_id: int, address: str):
 
 
 async def get_wallets_by_chat(chat_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT address, label FROM wallets WHERE chat_id = ?",
+            (chat_id,)
+        ) as cursor:
+            return await cursor.fetchall()
+
+
+async def get_wallets_with_labels_by_chat(chat_id: int):
+    """Get all wallets for a chat with their labels"""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT address, label FROM wallets WHERE chat_id = ?",
