@@ -1,21 +1,8 @@
-# Updated `bot.py` — Show ONLY Active Common Positions
-
-This update changes the `/common` command to **ignore closed positions**. It will only show coins where 2 or more wallets are **currently holding** an open position. It also uses your current position side (Long/Short), leverage, size, and PnL.
-
----
-
-## Update `bot.py` on GitHub
-
-**Go to GitHub → Click `bot.py` → Click pencil ✏️**
-
-**Select ALL → Delete → Paste this entire code:**
-
-```python
 import asyncio
 import logging
 import aiohttp
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -45,23 +32,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Nepal Time = UTC + 5:45
-NEPAL_OFFSET = timedelta(hours=5, minutes=45)
-
-
-def to_nepal_time(utc_timestamp_ms):
-    """Convert UTC millisecond timestamp to Nepal time string"""
-    utc_dt = datetime.utcfromtimestamp(utc_timestamp_ms / 1000)
-    nepal_dt = utc_dt + NEPAL_OFFSET
-    return nepal_dt.strftime('%Y-%m-%d %H:%M:%S')
-
-
-def now_nepal():
-    """Get current Nepal time string"""
-    utc_now = datetime.utcnow()
-    nepal_now = utc_now + NEPAL_OFFSET
-    return nepal_now.strftime('%Y-%m-%d %H:%M:%S')
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
@@ -73,9 +43,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/list` — Show your wallets\n"
         "`/positions <address>` — View positions\n"
         "`/orders <address>` — View open orders\n"
-        "`/common` — Common active positions\n"
+        "`/common` — Common coin activity\n"
         "`/help` — Show this message\n\n"
-        f"🕐 Time: Nepal Time (UTC+5:45)\n"
         f"🔄 Checking every {CHECK_INTERVAL} seconds"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -220,7 +189,6 @@ async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             size = float(pos.get("szi", 0))
             entry = float(pos.get("entryPx", 0) or 0)
             upnl = float(pos.get("unrealizedPnl", 0))
-            liq = float(pos.get("liquidationPx", 0) or 0)
             direction = "🟢 LONG" if size > 0 else "🔴 SHORT"
             pnl_icon = "📈" if upnl >= 0 else "📉"
             pnl_sign = "+" if upnl >= 0 else ""
@@ -229,7 +197,6 @@ async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{direction} *{coin}*\n"
                 f"• Size: {abs(size)}\n"
                 f"• Entry: ${entry:,.4f}\n"
-                f"• Liq: ${liq:,.4f}\n"
                 f"• {pnl_icon} PnL: {pnl_sign}${upnl:,.2f}\n"
             )
 
@@ -284,13 +251,10 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── Common Active Positions ─────────────────────────────────
+# ─── Common Trades ───────────────────────────────────────────
 
 
-async def common_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def common_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             InlineKeyboardButton(
@@ -318,9 +282,10 @@ async def common_command(
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "🔍 *COMMON ACTIVE COINS*\n\n"
-        "Select time range to analyze recent trades.\n"
-        "Shows coins where multiple wallets **STILL hold an open position**.\n\n"
+        "🔍 *COMMON COIN ACTIVITY*\n\n"
+        "Select time range to analyze:\n"
+        "Shows all coins being traded by\n"
+        "multiple wallets — any direction!\n\n"
         "👇 Tap a button below",
         parse_mode="Markdown",
         reply_markup=reply_markup
@@ -347,18 +312,6 @@ async def fetch_wallet_position(session, address, coin):
             return None
     except Exception:
         return None
-
-
-def calculate_leverage(position):
-    """Calculate leverage from position data"""
-    try:
-        leverage = position.get("leverage", {})
-        if isinstance(leverage, dict):
-            val = leverage.get("value", 1)
-            return int(val) if val else 1
-        return int(leverage) if leverage else 1
-    except Exception:
-        return 1
 
 
 async def common_callback(
@@ -411,6 +364,7 @@ async def common_callback(
     now_ms = int(time.time() * 1000)
     since_ms = now_ms - (hours * 60 * 60 * 1000)
 
+    # {coin: [trader_details]}
     coin_activity = defaultdict(list)
 
     async with aiohttp.ClientSession() as session:
@@ -437,7 +391,10 @@ async def common_callback(
 
                 for trade in recent:
                     coin = trade.get("coin", "")
+                    side = trade.get("side", "")
                     price = float(trade.get("px", 0))
+                    size = float(trade.get("sz", 0))
+                    order_value = price * size
                     trade_time = trade.get("time", 0)
 
                     if not coin:
@@ -446,47 +403,50 @@ async def common_callback(
                     if coin not in seen_coins:
                         seen_coins.add(coin)
 
-                        # Fetch live position data
+                        # Fetch current position for PnL
                         pos = await fetch_wallet_position(
                             session, address, coin
                         )
 
+                        # Get position details
+                        pos_size = 0
+                        pos_value = 0
+                        upnl = 0
+                        entry_price = price
+                        is_open = False
+
                         if pos:
-                            pos_size = float(pos.get("szi", 0) or 0)
-                            
-                            # 🚫 IGNORE IF POSITION IS CLOSED (SZI == 0)
-                            if pos_size == 0:
-                                continue
-
-                            entry_price = float(pos.get("entryPx", 0) or price)
-                            upnl = float(pos.get("unrealizedPnl", 0) or 0)
-                            liq_price = float(pos.get("liquidationPx", 0) or 0)
-                            leverage = calculate_leverage(pos)
+                            pos_size = float(
+                                pos.get("szi", 0) or 0
+                            )
+                            entry_price = float(
+                                pos.get("entryPx", 0) or price
+                            )
+                            upnl = float(
+                                pos.get("unrealizedPnl", 0) or 0
+                            )
                             pos_value = abs(pos_size) * entry_price
-                            
-                            # Use current position size for direction
-                            side = "B" if pos_size > 0 else "A"
+                            is_open = pos_size != 0
 
-                            coin_activity[coin].append({
-                                "name": wallet_name,
-                                "address": address,
-                                "side": side,
-                                "price": price, # Last traded price
-                                "size": abs(pos_size), # Active size
-                                "time": trade_time,
-                                "pos_value": pos_value,
-                                "upnl": upnl,
-                                "liq_price": liq_price,
-                                "leverage": leverage,
-                                "is_open": True,
-                                "entry_price": entry_price
-                            })
+                        coin_activity[coin].append({
+                            "name": wallet_name,
+                            "address": address,
+                            "side": side,
+                            "price": price,
+                            "size": size,
+                            "value": order_value,
+                            "time": trade_time,
+                            "pos_value": pos_value,
+                            "upnl": upnl,
+                            "is_open": is_open,
+                            "entry_price": entry_price
+                        })
 
             except Exception as e:
                 logger.error(f"Error fetching {address}: {e}")
                 continue
 
-    # Filter only coins where 2+ wallets have ACTIVE positions
+    # Filter coins with 2+ wallets
     common_coins = {
         coin: traders
         for coin, traders in coin_activity.items()
@@ -495,22 +455,25 @@ async def common_callback(
 
     if not common_coins:
         await query.edit_message_text(
-            f"📭 *No Active Common Coins Found*\n\n"
-            f"No 2+ wallets are currently holding the same coin.\n\n"
+            f"📭 *No Common Coins Found*\n\n"
+            f"No 2+ wallets traded the same coin\n"
+            f"in last *{time_label}*\n\n"
             f"Try a longer time range!",
             parse_mode="Markdown"
         )
         return
 
-    # Sort by most wallets holding the coin
+    # Sort by most wallets
     sorted_coins = sorted(
         common_coins.items(),
         key=lambda x: len(x[1]),
         reverse=True
     )
 
-    msg = f"👁️ *COMMON ACTIVE COIN ACTIVITY*\n"
-    msg += f"⏰ Traded in last {time_label}\n"
+    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+    msg = f"👁️ *COMMON COIN ACTIVITY*\n"
+    msg += f"⏰ Last {time_label}\n"
     msg += f"👛 {total_wallets} Wallets Analyzed\n"
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
 
@@ -523,9 +486,9 @@ async def common_callback(
         # Coin header
         msg += f"🪙 *{coin}/USDC*"
         msg += f" — {wallet_count}"
-        msg += f" Wallet{'s' if wallet_count > 1 else ''} holding\n"
+        msg += f" Wallet{'s' if wallet_count > 1 else ''}\n"
 
-        # Long short split summary
+        # Long short split
         if longs and shorts:
             msg += (
                 f"   🟢 {len(longs)} "
@@ -534,9 +497,15 @@ async def common_callback(
                 f"Short{'s' if len(shorts) > 1 else ''}\n"
             )
         elif longs:
-            msg += f"   🟢 All Longs\n"
+            msg += (
+                f"   🟢 All Long"
+                f"{'s' if len(longs) > 1 else ''}\n"
+            )
         elif shorts:
-            msg += f"   🔴 All Shorts\n"
+            msg += (
+                f"   🔴 All Short"
+                f"{'s' if len(shorts) > 1 else ''}\n"
+            )
 
         msg += f"━━━━━━━━━━━━━━━━━━━━\n"
 
@@ -548,15 +517,15 @@ async def common_callback(
             all_traders.append((t, "SHORT", "🔴"))
 
         for trader, direction, emoji in all_traders:
-
-            # Convert to Nepal time
-            nepal_time = to_nepal_time(trader["time"])
+            trade_time_str = datetime.utcfromtimestamp(
+                trader["time"] / 1000
+            ).strftime('%d/%m %H:%M')
 
             upnl = trader["upnl"]
             pos_value = trader["pos_value"]
-            liq_price = trader["liq_price"]
-            leverage = trader["leverage"]
+            is_open = trader["is_open"]
 
+            # PnL display with color emoji
             if upnl > 0:
                 pnl_str = f"🟢 +${upnl:,.2f}"
             elif upnl < 0:
@@ -564,21 +533,28 @@ async def common_callback(
             else:
                 pnl_str = f"⚪ $0.00"
 
+            # Position status
+            status = "🔓 OPEN" if is_open else "🔒 CLOSED"
+
             msg += f"{emoji} *{direction}* — *{trader['name']}*\n"
             msg += (
-                f"   📦 `{trader['size']:.4f} {coin}`"
-                f" @ `${trader['entry_price']:,.4f}`\n"
+                f"   📦 Size: `{trader['size']:.4f}`"
+                f" @ `${trader['price']:,.4f}`\n"
             )
-            msg += f"   ⚡ Leverage: `{leverage}x`\n"
-            msg += f"   📊 Position: `${pos_value:,.2f}`\n"
-            msg += f"   💰 PnL: {pnl_str}\n"
-            if liq_price and liq_price > 0:
-                msg += f"   💀 Liq: `${liq_price:,.4f}`\n"
+            msg += f"   💵 Trade Value: `${trader['value']:,.2f}`\n"
 
-            msg += f"   🕐 `{nepal_time} (NPT)`\n\n"
+            if is_open:
+                msg += (
+                    f"   📊 Position: `${pos_value:,.2f}`"
+                    f" | {pnl_str}\n"
+                )
+            else:
+                msg += f"   📊 Position: {status}\n"
+
+            msg += f"   🕐 `{trade_time_str}`\n\n"
 
     msg += f"━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"📅 {now_nepal()} (NPT)"
+    msg += f"📅 {now_str} (UTC+0)"
 
     if len(msg) > 4000:
         msg = msg[:3900] + "\n\n_...truncated. Use shorter range_"
@@ -631,13 +607,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
-
-**Commit changes** ✅
-
----
-
-### Key changes made:
-1. It now checks the live position size `pos_size` of a coin traded in that period.
-2. If `pos_size == 0` (meaning they scalped it and closed it), it skips it.
-3. It only shows coins where **2+ people are holding a live position**. All output will always be live and active!
