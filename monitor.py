@@ -3,9 +3,17 @@ import asyncio
 import logging
 from datetime import datetime
 from config import HYPERLIQUID_API, HEADERS, CHECK_INTERVAL
-from database import get_all_wallets, get_last_trade_time, update_last_trade_time, is_wallet_monitored, get_wallets_by_chat
+from database import (
+    get_all_wallets,
+    get_last_trade_time,
+    update_last_trade_time,
+    is_wallet_monitored,
+    get_wallets_by_chat
+)
 
 logger = logging.getLogger(__name__)
+
+previous_positions = {}
 
 
 async def fetch_trades(session, address):
@@ -59,80 +67,190 @@ async def fetch_open_orders(session, address):
         return []
 
 
-def format_trade_message(trade, address, label):
-    side = "🟢 LONG" if trade.get("side") == "B" else "🔴 SHORT"
-    direction = "BUY" if trade.get("side") == "B" else "SELL"
-    coin = trade.get("coin", "Unknown")
-    size = trade.get("sz", "0")
-    price = trade.get("px", "0")
-    fee = trade.get("fee", "0")
+def get_position_details(coin, asset_positions):
+    for p in asset_positions:
+        pos = p.get("position", {})
+        if pos.get("coin") == coin:
+            return pos
+    return {}
 
+
+def calculate_leverage(position):
     try:
-        usd_value = float(size) * float(price)
-        usd_formatted = f"${usd_value:,.2f}"
+        leverage = position.get("leverage", {})
+        if isinstance(leverage, dict):
+            val = leverage.get("value", 1)
+            return int(val) if val else 1
+        return int(leverage) if leverage else 1
     except Exception:
-        usd_formatted = "N/A"
+        return 1
 
+
+def determine_action(side, pos_before, pos_after):
+    if pos_after > 0:
+        direction = "LONG"
+        dir_emoji = "🟢"
+    elif pos_after < 0:
+        direction = "SHORT"
+        dir_emoji = "🔴"
+    else:
+        if pos_before > 0:
+            direction = "LONG"
+            dir_emoji = "🟢"
+        elif pos_before < 0:
+            direction = "SHORT"
+            dir_emoji = "🔴"
+        else:
+            direction = "LONG" if side == "B" else "SHORT"
+            dir_emoji = "🟢" if side == "B" else "🔴"
+
+    if pos_before == 0 and pos_after != 0:
+        action = "Open"
+
+    elif pos_after == 0 and pos_before != 0:
+        action = "Close"
+
+    elif (pos_before > 0 and pos_after < 0) or \
+         (pos_before < 0 and pos_after > 0):
+        action = "Flip"
+        direction = "LONG" if pos_after > 0 else "SHORT"
+        dir_emoji = "🟢" if pos_after > 0 else "🔴"
+
+    elif abs(pos_after) > abs(pos_before):
+        action = "Increase"
+
+    elif abs(pos_after) < abs(pos_before):
+        action = "Reduce"
+
+    else:
+        action = "Open"
+
+    action_str = f"Cross-{direction.capitalize()}-{action}"
+    return action, direction, dir_emoji, action_str
+
+
+def format_quantity_change(pos_before, pos_after):
+    if pos_before == 0 and pos_after == 0:
+        pct_str = "+0.00"
+    elif pos_before == 0:
+        pct_str = "+100.00"
+    elif pos_after == 0:
+        pct_str = "-100.00"
+    else:
+        pct = ((abs(pos_after) - abs(pos_before)) / abs(pos_before)) * 100
+        pct_str = f"+{pct:.2f}" if pct >= 0 else f"{pct:.2f}"
+    return f"{pos_before:.4f} → {pos_after:.4f} ({pct_str}%)"
+
+
+def format_trade_message(
+    trade,
+    address,
+    label,
+    position_after=None,
+    position_before_size=0
+):
+    coin = trade.get("coin", "Unknown")
+    side = trade.get("side", "B")
+    trade_size = float(trade.get("sz", 0))
+    price = float(trade.get("px", 0))
     timestamp = trade.get("time", 0)
+    order_value = trade_size * price
+
+    pos = position_after or {}
+    pos_size_after = float(pos.get("szi", 0) or 0)
+    entry_price = float(pos.get("entryPx", 0) or price)
+    liq_price = float(pos.get("liquidationPx", 0) or 0)
+    upnl = float(pos.get("unrealizedPnl", 0) or 0)
+    leverage = calculate_leverage(pos)
+    total_value = abs(pos_size_after) * entry_price
+
+    if total_value > 0 and leverage > 0:
+        margin = total_value / leverage
+        upnl_pct = (upnl / margin) * 100 if margin > 0 else 0
+    else:
+        upnl_pct = 0.0
+
+    pnl_sign = "+" if upnl >= 0 else ""
+
+    action, direction, dir_emoji, action_str = determine_action(
+        side,
+        position_before_size,
+        pos_size_after
+    )
+
+    wallet_name = label.upper() if label else f"{address[:8]}...{address[-6:]}"
+
     trade_time = datetime.utcfromtimestamp(
         timestamp / 1000
-    ).strftime('%Y-%m-%d %H:%M:%S UTC')
+    ).strftime('%Y-%m-%d %H:%M:%S')
 
-    wallet_display = label if label else f"{address[:6]}...{address[-4:]}"
+    quantity_change = format_quantity_change(
+        position_before_size,
+        pos_size_after
+    )
 
-    message = "🔔 *Trade Detected!*\n"
-    message += f"👛 Wallet: `{wallet_display}`\n"
-    message += "━━━━━━━━━━━━━━\n"
-    message += f"{side} | {direction}\n"
-    message += f"📊 Asset: *{coin}*\n"
-    message += f"💰 Size: {size}\n"
-    message += f"💲 Price: ${float(price):,.4f}\n"
-    message += f"💵 Value: {usd_formatted}\n"
-    message += f"💸 Fee: ${float(fee):,.4f}\n"
-    message += f"⏰ Time: {trade_time}\n"
-    message += "━━━━━━━━━━━━━━\n"
-    message += f"🔗 [View on Hyperliquid](https://app.hyperliquid.xyz/explorer/address/{address})"
-    return message
+    msg = ""
 
+    msg += f"👁️ *{wallet_name}*\n"
+    msg += f"👛 `{address}`\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
 
-async def initialize_wallet_time(session, address):
-    """
-    When a new wallet is added set its last trade time
-    to the most recent trade so we dont send old notifications
-    """
-    import time
+    msg += f"🔔 *ACTION — {dir_emoji} {direction}*\n"
+    msg += f"✳️ {coin}/USDC ({action_str})\n"
+    msg += f"• Quantity: {quantity_change}\n"
+    msg += f"• Order Value: ${order_value:,.2f}\n"
+    msg += f"• Avg. Price: ${price:.4f}\n"
 
-    # Get current time as default
-    current_time = int(time.time() * 1000)
+    msg += f"\n📊 *POSITION*\n"
 
-    try:
-        trades = await fetch_trades(session, address)
-        if trades:
-            # Get the most recent trade time
-            latest = max(t.get("time", 0) for t in trades)
-            return latest
+    if pos and pos_size_after != 0:
+        msg += f"• Total Value: ${total_value:,.2f}\n"
+        msg += f"• Avg. Entry: ${entry_price:.4f}\n"
+        if liq_price and liq_price > 0:
+            msg += f"• Liquidation Price: ${liq_price:.4f}\n"
         else:
-            return current_time
-    except Exception:
-        return current_time
+            msg += f"• Liquidation Price: N/A\n"
+        msg += f"• Unrealized PnL: ${upnl:.2f}({pnl_sign}{upnl_pct:.2f}%)\n"
+        msg += f"• Leverage: {leverage}x\n"
+    else:
+        msg += f"• Position Closed\n"
+        msg += f"• Realized PnL: ${upnl:.2f}\n"
+
+    msg += f"\n📅 {trade_time} (UTC+0)"
+
+    return msg
 
 
 async def check_wallet(session, address, chat_ids, labels, bot):
+    global previous_positions
+
     still_monitored = await is_wallet_monitored(address)
     if not still_monitored:
-        logger.info(f"Skipping {address} - no longer monitored")
         return
+
+    position_data = await fetch_positions(session, address)
+    asset_positions = position_data.get("assetPositions", [])
+
+    current_positions = {}
+    for p in asset_positions:
+        pos = p.get("position", {})
+        coin = pos.get("coin", "")
+        size = float(pos.get("szi", 0) or 0)
+        if coin:
+            current_positions[coin] = size
+
+    prev_positions = previous_positions.get(address, {})
 
     trades = await fetch_trades(session, address)
     if not trades:
+        previous_positions[address] = current_positions
         return
 
     last_time = await get_last_trade_time(address)
-
-    # ✅ ONLY GET TRADES THAT HAPPENED AFTER WE STARTED MONITORING
     new_trades = [t for t in trades if t.get("time", 0) > last_time]
 
     if not new_trades:
+        previous_positions[address] = current_positions
         return
 
     new_trades.sort(key=lambda x: x.get("time", 0))
@@ -144,17 +262,25 @@ async def check_wallet(session, address, chat_ids, labels, bot):
     for trade in new_trades:
         still_monitored = await is_wallet_monitored(address)
         if not still_monitored:
-            logger.info(f"Stopped notifications for {address} - removed")
             return
 
-        message = format_trade_message(trade, address, label)
+        coin = trade.get("coin", "")
+        pos_before_size = prev_positions.get(coin, 0)
+        pos_details = get_position_details(coin, asset_positions)
+
+        message = format_trade_message(
+            trade,
+            address,
+            label,
+            position_after=pos_details,
+            position_before_size=pos_before_size
+        )
 
         for chat_id in chat_ids:
             user_wallets = await get_wallets_by_chat(chat_id)
             user_addresses = [w[0] for w in user_wallets]
 
             if address not in user_addresses:
-                logger.info(f"Skipping {chat_id} - they removed {address}")
                 continue
 
             try:
@@ -164,9 +290,11 @@ async def check_wallet(session, address, chat_ids, labels, bot):
                     parse_mode="Markdown",
                     disable_web_page_preview=True
                 )
-                logger.info(f"Sent trade alert to {chat_id}")
+                logger.info(f"✅ Sent {coin} alert to {chat_id}")
             except Exception as e:
                 logger.error(f"Error sending to {chat_id}: {e}")
+
+    previous_positions[address] = current_positions
 
 
 async def monitor_loop(bot):
