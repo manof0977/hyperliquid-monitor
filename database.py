@@ -1,18 +1,30 @@
 import aiosqlite
 import time
 import os
+import logging
 
-# Use persistent volume on Railway
-# Falls back to local folder on PC
-if os.path.exists("/app/data"):
-    DB_PATH = "/app/data/wallets.db"
+logger = logging.getLogger(__name__)
+
+# ── Persistent Storage Path ──────────────────────────────────
+# Railway Volume must be mounted at /app/data
+# This ensures wallets survive redeployments forever
+
+DATA_DIR = "/app/data"
+
+if os.path.exists(DATA_DIR):
+    DB_PATH = os.path.join(DATA_DIR, "wallets.db")
+    logger.info(f"✅ Using persistent storage: {DB_PATH}")
+    print(f"✅ Using persistent storage: {DB_PATH}")
 else:
-    DB_PATH = "wallets.db"
-
-print(f"Database path: {DB_PATH}")
+    DB_PATH = os.path.join(os.getcwd(), "wallets.db")
+    logger.info(f"⚠️ Using local storage: {DB_PATH}")
+    print(f"⚠️ Using local storage: {DB_PATH}")
 
 
 async def init_db():
+    # Make sure directory exists
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS wallets (
@@ -30,6 +42,7 @@ async def init_db():
             )
         """)
         await db.commit()
+        print(f"✅ Database initialized at {DB_PATH}")
 
 
 async def add_wallet(chat_id: int, address: str, label: str = None):
@@ -50,7 +63,8 @@ async def add_wallet(chat_id: int, address: str, label: str = None):
 
             if not row:
                 await db.execute(
-                    "INSERT INTO last_trades (address, last_trade_time) VALUES (?, ?)",
+                    "INSERT INTO last_trades (address, last_trade_time) "
+                    "VALUES (?, ?)",
                     (address.lower(), current_time)
                 )
                 await db.commit()
