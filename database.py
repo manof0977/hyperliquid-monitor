@@ -5,25 +5,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ── Persistent Storage Path ──────────────────────────────────
-# Railway Volume must be mounted at /app/data
-# This ensures wallets survive redeployments forever
-
 DATA_DIR = "/app/data"
 
 if os.path.exists(DATA_DIR):
     DB_PATH = os.path.join(DATA_DIR, "wallets.db")
-    logger.info(f"✅ Using persistent storage: {DB_PATH}")
     print(f"✅ Using persistent storage: {DB_PATH}")
 else:
     DB_PATH = os.path.join(os.getcwd(), "wallets.db")
-    logger.info(f"⚠️ Using local storage: {DB_PATH}")
     print(f"⚠️ Using local storage: {DB_PATH}")
 
 
 async def init_db():
-    # Make sure directory exists
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -54,7 +47,11 @@ async def add_wallet(chat_id: int, address: str, label: str = None):
             )
             await db.commit()
 
+            # ✅ ALWAYS set to current time when adding
+            # This prevents sending ANY old trades
             current_time = int(time.time() * 1000)
+
+            # Check if already exists in last_trades
             async with db.execute(
                 "SELECT last_trade_time FROM last_trades WHERE address = ?",
                 (address.lower(),)
@@ -62,13 +59,22 @@ async def add_wallet(chat_id: int, address: str, label: str = None):
                 row = await cursor.fetchone()
 
             if not row:
+                # New wallet — set to NOW
                 await db.execute(
                     "INSERT INTO last_trades (address, last_trade_time) "
                     "VALUES (?, ?)",
                     (address.lower(), current_time)
                 )
-                await db.commit()
+            else:
+                # Existing wallet — update to NOW
+                # Prevents old trade spam on re-add
+                await db.execute(
+                    "UPDATE last_trades SET last_trade_time = ? "
+                    "WHERE address = ?",
+                    (current_time, address.lower())
+                )
 
+            await db.commit()
             return True
 
         except aiosqlite.IntegrityError:
@@ -145,7 +151,12 @@ async def get_last_trade_time(address: str):
             (address.lower(),)
         ) as cursor:
             row = await cursor.fetchone()
-            return row[0] if row else 0
+            # ✅ If no record found return current time
+            # This prevents sending old trades
+            if row:
+                return row[0]
+            else:
+                return int(time.time() * 1000)
 
 
 async def update_last_trade_time(address: str, timestamp: int):
