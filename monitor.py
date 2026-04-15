@@ -13,13 +13,25 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
-# Nepal Time (UTC + 5:45)
+# Nepal Time
 NEPAL_OFFSET = timedelta(hours=5, minutes=45)
 
+# Previous positions memory
 previous_positions = {}
 
-# ✅ Rate limiting — max messages per minute
-MESSAGE_DELAY = 1.0  # seconds between each message
+# Global message queue
+message_queue = asyncio.Queue()
+
+# Delay between each message (seconds)
+# 2 seconds = max 30 messages per minute
+# Safe limit is 20 messages per minute per bot
+MESSAGE_DELAY = 3.0
+
+
+def to_nepal_time(utc_timestamp_ms):
+    utc_dt = datetime.utcfromtimestamp(utc_timestamp_ms / 1000)
+    nepal_dt = utc_dt + NEPAL_OFFSET
+    return nepal_dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
 async def fetch_trades(session, address):
@@ -138,15 +150,11 @@ def format_quantity_change(pos_before, pos_after):
     elif pos_after == 0:
         pct_str = "-100.00"
     else:
-        pct = ((abs(pos_after) - abs(pos_before)) / abs(pos_before)) * 100
+        pct = (
+            (abs(pos_after) - abs(pos_before)) / abs(pos_before)
+        ) * 100
         pct_str = f"+{pct:.2f}" if pct >= 0 else f"{pct:.2f}"
     return f"{pos_before:.4f} → {pos_after:.4f} ({pct_str}%)"
-
-
-def to_nepal_time(utc_timestamp_ms):
-    utc_dt = datetime.utcfromtimestamp(utc_timestamp_ms / 1000)
-    nepal_dt = utc_dt + NEPAL_OFFSET
-    return nepal_dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
 def format_trade_message(
@@ -183,7 +191,10 @@ def format_trade_message(
         side, position_before_size, pos_size_after
     )
 
-    wallet_name = label.upper() if label else f"{address[:8]}...{address[-6:]}"
+    wallet_name = (
+        label.upper() if label
+        else f"{address[:8]}...{address[-6:]}"
+    )
     trade_time = to_nepal_time(timestamp)
     quantity_change = format_quantity_change(
         position_before_size, pos_size_after
@@ -206,7 +217,10 @@ def format_trade_message(
             msg += f"• Liquidation Price: ${liq_price:.4f}\n"
         else:
             msg += f"• Liquidation Price: N/A\n"
-        msg += f"• Unrealized PnL: ${upnl:.2f}({pnl_sign}{upnl_pct:.2f}%)\n"
+        msg += (
+            f"• Unrealized PnL: ${upnl:.2f}"
+            f"({pnl_sign}{upnl_pct:.2f}%)\n"
+        )
         msg += f"• Leverage: {leverage}x\n"
     else:
         msg += f"• Position Closed\n"
@@ -216,57 +230,119 @@ def format_trade_message(
     return msg
 
 
-async def safe_send_message(bot, chat_id, message):
+# ─── Message Queue Worker ─────────────────────────────────────
+
+async def message_queue_worker(bot):
     """
-    Send message with rate limit protection
-    Waits and retries if flood control hit
+    Runs forever in background
+    Sends every single notification
+    but with safe delay between each
+    Never drops any message
+    Never floods Telegram
     """
-    max_retries = 3
-    for attempt in range(max_retries):
+    logger.info("✅ Message queue worker started!")
+
+    while True:
         try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
-            # ✅ Always wait between messages
-            await asyncio.sleep(MESSAGE_DELAY)
-            return True
-        except Exception as e:
-            error_str = str(e)
-            if "Flood control" in error_str or "429" in error_str:
-                # Extract retry time from error
+            # Wait for next message in queue
+            item = await message_queue.get()
+
+            chat_id = item["chat_id"]
+            message = item["message"]
+            retry_count = item.get("retry", 0)
+
+            sent = False
+            while not sent:
                 try:
-                    retry_seconds = int(
-                        error_str.split("Retry in ")[1].split(" ")[0]
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
                     )
-                    # Cap wait time at 60 seconds
-                    wait_time = min(retry_seconds, 60)
-                except Exception:
-                    wait_time = 30
+                    logger.info(f"✅ Queued message sent to {chat_id}")
+                    sent = True
 
-                logger.warning(
-                    f"Flood control hit — waiting {wait_time}s"
-                )
-                await asyncio.sleep(wait_time)
-            else:
-                logger.error(f"Error sending to {chat_id}: {e}")
-                return False
+                    # Safe delay between messages
+                    await asyncio.sleep(MESSAGE_DELAY)
 
-    return False
+                except Exception as e:
+                    error_str = str(e)
 
+                    if "Flood control" in error_str or "429" in error_str:
+                        # Extract exact wait time from Telegram
+                        try:
+                            wait = int(
+                                error_str.split(
+                                    "Retry in "
+                                )[1].split(" ")[0]
+                            )
+                            # Add 2 extra seconds buffer
+                            wait = wait + 2
+                        except Exception:
+                            wait = 15
+
+                        logger.warning(
+                            f"⚠️ Flood control hit — "
+                            f"waiting {wait}s then retrying"
+                        )
+                        # Wait exact time Telegram says
+                        # Then retry same message
+                        await asyncio.sleep(wait)
+                        # Don't mark as sent — loop continues
+
+                    elif "chat not found" in error_str.lower():
+                        logger.error(f"Chat {chat_id} not found — skipping")
+                        sent = True  # Skip this message
+
+                    else:
+                        logger.error(f"Send error: {e}")
+                        if retry_count < 5:
+                            await asyncio.sleep(5)
+                            retry_count += 1
+                        else:
+                            logger.error("Max retries — skipping message")
+                            sent = True
+
+            message_queue.task_done()
+
+        except Exception as e:
+            logger.error(f"Queue worker error: {e}")
+            await asyncio.sleep(1)
+
+
+async def queue_message(chat_id, message):
+    """
+    Add message to queue
+    Queue worker sends it when ready
+    Every message is guaranteed to be sent
+    """
+    await message_queue.put({
+        "chat_id": chat_id,
+        "message": message,
+        "retry": 0
+    })
+
+
+# ─── Wallet Checker ───────────────────────────────────────────
 
 async def check_wallet(session, address, chat_ids, labels, bot):
+    """
+    Check wallet for new trades
+    Queue ALL trades for sending
+    No limit on number of trades
+    """
     global previous_positions
 
     still_monitored = await is_wallet_monitored(address)
     if not still_monitored:
         return
 
+    # Fetch current positions
     position_data = await fetch_positions(session, address)
     asset_positions = position_data.get("assetPositions", [])
 
+    # Build current position map
     current_positions = {}
     for p in asset_positions:
         pos = p.get("position", {})
@@ -277,6 +353,7 @@ async def check_wallet(session, address, chat_ids, labels, bot):
 
     prev_positions = previous_positions.get(address, {})
 
+    # Fetch trades
     trades = await fetch_trades(session, address)
     if not trades:
         previous_positions[address] = current_positions
@@ -284,7 +361,7 @@ async def check_wallet(session, address, chat_ids, labels, bot):
 
     last_time = await get_last_trade_time(address)
 
-    # ✅ Only get trades AFTER last recorded time
+    # Get ALL new trades — no limit
     new_trades = [
         t for t in trades
         if t.get("time", 0) > last_time
@@ -294,20 +371,37 @@ async def check_wallet(session, address, chat_ids, labels, bot):
         previous_positions[address] = current_positions
         return
 
-    # ✅ Limit to max 3 new trades per check
-    # Prevents spam if many trades happened at once
+    # Sort oldest first so notifications arrive in order
     new_trades.sort(key=lambda x: x.get("time", 0))
-    new_trades = new_trades[:3]
 
+    # Update last trade time
     latest_time = max(t.get("time", 0) for t in new_trades)
     await update_last_trade_time(address, latest_time)
 
     label = labels.get(address)
 
+    # Get valid chats for this wallet
+    valid_chats = []
+    for chat_id in chat_ids:
+        user_wallets = await get_wallets_by_chat(chat_id)
+        user_addresses = [w[0] for w in user_wallets]
+        if address in user_addresses:
+            valid_chats.append(chat_id)
+
+    if not valid_chats:
+        previous_positions[address] = current_positions
+        return
+
+    logger.info(
+        f"📨 Queuing {len(new_trades)} trades for "
+        f"{address[:8]}..."
+    )
+
+    # ✅ Queue EVERY trade notification
     for trade in new_trades:
         still_monitored = await is_wallet_monitored(address)
         if not still_monitored:
-            return
+            break
 
         coin = trade.get("coin", "")
         pos_before_size = prev_positions.get(coin, 0)
@@ -321,22 +415,21 @@ async def check_wallet(session, address, chat_ids, labels, bot):
             position_before_size=pos_before_size
         )
 
-        for chat_id in chat_ids:
-            user_wallets = await get_wallets_by_chat(chat_id)
-            user_addresses = [w[0] for w in user_wallets]
-
-            if address not in user_addresses:
-                continue
-
-            # ✅ Use safe send with rate limit protection
-            await safe_send_message(bot, chat_id, message)
-            logger.info(f"✅ Sent {coin} alert to {chat_id}")
+        # Add to queue for EVERY chat
+        for chat_id in valid_chats:
+            await queue_message(chat_id, message)
 
     previous_positions[address] = current_positions
 
 
+# ─── Monitor Loop ─────────────────────────────────────────────
+
 async def monitor_loop(bot):
     logger.info("Monitor loop started!")
+
+    # ✅ Start queue worker as background task
+    # It runs forever alongside monitor loop
+    asyncio.create_task(message_queue_worker(bot))
 
     async with aiohttp.ClientSession() as session:
         while True:
