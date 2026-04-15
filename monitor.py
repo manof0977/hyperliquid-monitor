@@ -1,7 +1,7 @@
 import aiohttp
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import HYPERLIQUID_API, HEADERS, CHECK_INTERVAL
 from database import (
     get_all_wallets,
@@ -13,7 +13,13 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
+# Nepal Time (UTC + 5:45)
+NEPAL_OFFSET = timedelta(hours=5, minutes=45)
+
 previous_positions = {}
+
+# ✅ Rate limiting — max messages per minute
+MESSAGE_DELAY = 1.0  # seconds between each message
 
 
 async def fetch_trades(session, address):
@@ -106,22 +112,17 @@ def determine_action(side, pos_before, pos_after):
 
     if pos_before == 0 and pos_after != 0:
         action = "Open"
-
     elif pos_after == 0 and pos_before != 0:
         action = "Close"
-
     elif (pos_before > 0 and pos_after < 0) or \
          (pos_before < 0 and pos_after > 0):
         action = "Flip"
         direction = "LONG" if pos_after > 0 else "SHORT"
         dir_emoji = "🟢" if pos_after > 0 else "🔴"
-
     elif abs(pos_after) > abs(pos_before):
         action = "Increase"
-
     elif abs(pos_after) < abs(pos_before):
         action = "Reduce"
-
     else:
         action = "Open"
 
@@ -140,6 +141,12 @@ def format_quantity_change(pos_before, pos_after):
         pct = ((abs(pos_after) - abs(pos_before)) / abs(pos_before)) * 100
         pct_str = f"+{pct:.2f}" if pct >= 0 else f"{pct:.2f}"
     return f"{pos_before:.4f} → {pos_after:.4f} ({pct_str}%)"
+
+
+def to_nepal_time(utc_timestamp_ms):
+    utc_dt = datetime.utcfromtimestamp(utc_timestamp_ms / 1000)
+    nepal_dt = utc_dt + NEPAL_OFFSET
+    return nepal_dt.strftime('%Y-%m-%d %H:%M:%S')
 
 
 def format_trade_message(
@@ -173,34 +180,23 @@ def format_trade_message(
     pnl_sign = "+" if upnl >= 0 else ""
 
     action, direction, dir_emoji, action_str = determine_action(
-        side,
-        position_before_size,
-        pos_size_after
+        side, position_before_size, pos_size_after
     )
 
     wallet_name = label.upper() if label else f"{address[:8]}...{address[-6:]}"
-
-    trade_time = datetime.utcfromtimestamp(
-        timestamp / 1000
-    ).strftime('%Y-%m-%d %H:%M:%S')
-
+    trade_time = to_nepal_time(timestamp)
     quantity_change = format_quantity_change(
-        position_before_size,
-        pos_size_after
+        position_before_size, pos_size_after
     )
 
-    msg = ""
-
-    msg += f"👁️ *{wallet_name}*\n"
+    msg = f"👁️ *{wallet_name}*\n"
     msg += f"👛 `{address}`\n"
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
-
     msg += f"🔔 *ACTION — {dir_emoji} {direction}*\n"
     msg += f"✳️ {coin}/USDC ({action_str})\n"
     msg += f"• Quantity: {quantity_change}\n"
     msg += f"• Order Value: ${order_value:,.2f}\n"
     msg += f"• Avg. Price: ${price:.4f}\n"
-
     msg += f"\n📊 *POSITION*\n"
 
     if pos and pos_size_after != 0:
@@ -216,9 +212,49 @@ def format_trade_message(
         msg += f"• Position Closed\n"
         msg += f"• Realized PnL: ${upnl:.2f}\n"
 
-    msg += f"\n📅 {trade_time} (UTC+0)"
-
+    msg += f"\n📅 {trade_time} (NPT)"
     return msg
+
+
+async def safe_send_message(bot, chat_id, message):
+    """
+    Send message with rate limit protection
+    Waits and retries if flood control hit
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+            # ✅ Always wait between messages
+            await asyncio.sleep(MESSAGE_DELAY)
+            return True
+        except Exception as e:
+            error_str = str(e)
+            if "Flood control" in error_str or "429" in error_str:
+                # Extract retry time from error
+                try:
+                    retry_seconds = int(
+                        error_str.split("Retry in ")[1].split(" ")[0]
+                    )
+                    # Cap wait time at 60 seconds
+                    wait_time = min(retry_seconds, 60)
+                except Exception:
+                    wait_time = 30
+
+                logger.warning(
+                    f"Flood control hit — waiting {wait_time}s"
+                )
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Error sending to {chat_id}: {e}")
+                return False
+
+    return False
 
 
 async def check_wallet(session, address, chat_ids, labels, bot):
@@ -247,13 +283,22 @@ async def check_wallet(session, address, chat_ids, labels, bot):
         return
 
     last_time = await get_last_trade_time(address)
-    new_trades = [t for t in trades if t.get("time", 0) > last_time]
+
+    # ✅ Only get trades AFTER last recorded time
+    new_trades = [
+        t for t in trades
+        if t.get("time", 0) > last_time
+    ]
 
     if not new_trades:
         previous_positions[address] = current_positions
         return
 
+    # ✅ Limit to max 3 new trades per check
+    # Prevents spam if many trades happened at once
     new_trades.sort(key=lambda x: x.get("time", 0))
+    new_trades = new_trades[:3]
+
     latest_time = max(t.get("time", 0) for t in new_trades)
     await update_last_trade_time(address, latest_time)
 
@@ -283,16 +328,9 @@ async def check_wallet(session, address, chat_ids, labels, bot):
             if address not in user_addresses:
                 continue
 
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True
-                )
-                logger.info(f"✅ Sent {coin} alert to {chat_id}")
-            except Exception as e:
-                logger.error(f"Error sending to {chat_id}: {e}")
+            # ✅ Use safe send with rate limit protection
+            await safe_send_message(bot, chat_id, message)
+            logger.info(f"✅ Sent {coin} alert to {chat_id}")
 
     previous_positions[address] = current_positions
 
