@@ -88,77 +88,81 @@ def get_position_details(coin, asset_positions):
     return {}
 
 
+def infer_pos_before(trade, pos_after):
+    """
+    When we don't know pos_before (cache miss / restart),
+    infer it from the trade side/size and current pos_after.
+
+    If someone BOUGHT 5 and pos_after is 0 → pos_before was -5 (SHORT CLOSE)
+    If someone SOLD 5 and pos_after is 0 → pos_before was +5 (LONG CLOSE)
+    If someone BOUGHT 5 and pos_after is 5 → pos_before was 0 (LONG OPEN)
+    If someone SOLD 5 and pos_after is -5 → pos_before was 0 (SHORT OPEN)
+    If someone BOUGHT 2 and pos_after is 10 → pos_before was 8 (LONG INCREASE)
+    If someone SOLD 2 and pos_after is -10 → pos_before was -8 (SHORT INCREASE)
+    """
+    side = trade.get("side", "B")
+    sz = float(trade.get("sz", 0))
+
+    if side == "B":
+        # Bought → pos went up by sz
+        return pos_after - sz
+    else:
+        # Sold → pos went down by sz
+        return pos_after + sz
+
+
 def determine_action(side, pos_before, pos_after):
     """
     Determine trade action using signed position sizes.
-    pos_before and pos_after:
-      positive = LONG
-      negative = SHORT
-      0 = flat/closed
-    Returns: action, direction, dir_emoji, full_label
+    pos_before / pos_after: positive=LONG, negative=SHORT, 0=flat
     """
 
-    # ── Flip: crossed zero ──────────────────────────
+    # ── Flip: crossed zero ──
     if (pos_before > 0 and pos_after < 0) or \
        (pos_before < 0 and pos_after > 0):
         direction = "LONG" if pos_after > 0 else "SHORT"
         dir_emoji = "🟢" if pos_after > 0 else "🔴"
-        action = "Flip"
         full_label = f"{'🟢 LONG' if pos_after > 0 else '🔴 SHORT'} FLIP"
-        return action, direction, dir_emoji, full_label
+        return "Flip", direction, dir_emoji, full_label
 
-    # ── Open: was flat, now has position ────────────
+    # ── Open: was flat, now has position ──
     if pos_before == 0 and pos_after != 0:
         direction = "LONG" if pos_after > 0 else "SHORT"
         dir_emoji = "🟢" if pos_after > 0 else "🔴"
-        action = "Open"
         full_label = f"{'🟢 LONG' if pos_after > 0 else '🔴 SHORT'} OPEN"
-        return action, direction, dir_emoji, full_label
+        return "Open", direction, dir_emoji, full_label
 
-    # ── Close: had position, now flat ───────────────
+    # ── Close: had position, now flat ──
     if pos_after == 0 and pos_before != 0:
         direction = "LONG" if pos_before > 0 else "SHORT"
         dir_emoji = "🟢" if pos_before > 0 else "🔴"
-        action = "Close"
         full_label = f"{'🟢 LONG' if pos_before > 0 else '🔴 SHORT'} CLOSE"
-        return action, direction, dir_emoji, full_label
+        return "Close", direction, dir_emoji, full_label
 
-    # ── Both same side ───────────────────────────────
+    # ── Long side ──
     if pos_before > 0 and pos_after > 0:
-        direction = "LONG"
-        dir_emoji = "🟢"
         if pos_after > pos_before:
-            action = "Increase"
-            full_label = "🟢 LONG INCREASE"
+            return "Increase", "LONG", "🟢", "🟢 LONG INCREASE"
         else:
-            action = "Reduce"
-            full_label = "🟢 LONG REDUCE"
-        return action, direction, dir_emoji, full_label
+            return "Reduce", "LONG", "🟢", "🟢 LONG REDUCE"
 
+    # ── Short side ──
     if pos_before < 0 and pos_after < 0:
-        direction = "SHORT"
-        dir_emoji = "🔴"
         if abs(pos_after) > abs(pos_before):
-            action = "Increase"
-            full_label = "🔴 SHORT INCREASE"
+            return "Increase", "SHORT", "🔴", "🔴 SHORT INCREASE"
         else:
-            action = "Reduce"
-            full_label = "🔴 SHORT REDUCE"
-        return action, direction, dir_emoji, full_label
+            return "Reduce", "SHORT", "🔴", "🔴 SHORT REDUCE"
 
-    # ── Fallback ─────────────────────────────────────
+    # ── Fallback (should rarely happen now) ──
     direction = "LONG" if side == "B" else "SHORT"
     dir_emoji = "🟢" if side == "B" else "🔴"
-    action = "Open"
-    full_label = f"{'🟢 LONG' if side == 'B' else '🔴 SHORT'} OPEN"
-    return action, direction, dir_emoji, full_label
+    full_label = f"{'🟢 LONG' if side == 'B' else '🔴 SHORT'} TRADE"
+    return "Trade", direction, dir_emoji, full_label
 
 
 def get_action_short(side, pos_before, pos_after):
-    """
-    Returns short label for summary tree view.
-    Uses signed pos values.
-    """
+    """Short label for summary tree view using signed positions."""
+
     # Flip
     if (pos_before > 0 and pos_after < 0) or \
        (pos_before < 0 and pos_after > 0):
@@ -191,72 +195,58 @@ def get_action_short(side, pos_before, pos_after):
 
     # Fallback
     direction = "LONG" if side == "B" else "SHORT"
-    return f"{direction} OPEN "
+    return f"{direction} TRADE"
 
 
 def get_summary_header(trades_with_context):
-    """
-    Analyze all trades to build a smart summary header.
-    trades_with_context: list of (trade, pos_before, pos_after)
-    Returns a descriptive header string.
-    """
+    """Build smart summary header from trades context."""
     actions = set()
     directions = set()
 
     for trade, pos_before, pos_after in trades_with_context:
         side = trade.get("side", "B")
 
-        # Flip
         if (pos_before > 0 and pos_after < 0) or \
            (pos_before < 0 and pos_after > 0):
             actions.add("FLIP")
             directions.add("LONG" if pos_after > 0 else "SHORT")
             continue
 
-        # Open
         if pos_before == 0 and pos_after != 0:
             actions.add("OPEN")
             directions.add("LONG" if pos_after > 0 else "SHORT")
             continue
 
-        # Close
         if pos_after == 0 and pos_before != 0:
             actions.add("CLOSE")
             directions.add("LONG" if pos_before > 0 else "SHORT")
             continue
 
-        # Long side
         if pos_before > 0 and pos_after > 0:
             directions.add("LONG")
-            if pos_after > pos_before:
-                actions.add("INCREASE")
-            else:
-                actions.add("REDUCE")
+            actions.add("INCREASE" if pos_after > pos_before else "REDUCE")
             continue
 
-        # Short side
         if pos_before < 0 and pos_after < 0:
             directions.add("SHORT")
-            if abs(pos_after) > abs(pos_before):
-                actions.add("INCREASE")
-            else:
-                actions.add("REDUCE")
+            actions.add("INCREASE" if abs(pos_after) > abs(pos_before) else "REDUCE")
             continue
 
-        # Fallback
         directions.add("LONG" if side == "B" else "SHORT")
-        actions.add("OPEN")
+        actions.add("TRADE")
 
     # Build direction string
     if "LONG" in directions and "SHORT" in directions:
         dir_str = "🟢 LONG & 🔴 SHORT"
     elif "LONG" in directions:
         dir_str = "🟢 LONG"
-    else:
+    elif "SHORT" in directions:
         dir_str = "🔴 SHORT"
+    else:
+        dir_str = "⚡"
 
     # Build action string
-    action_priority = ["FLIP", "OPEN", "CLOSE", "INCREASE", "REDUCE"]
+    action_priority = ["FLIP", "OPEN", "CLOSE", "INCREASE", "REDUCE", "TRADE"]
     sorted_actions = [a for a in action_priority if a in actions]
     action_str = " + ".join(sorted_actions) if sorted_actions else "TRADE"
 
@@ -268,7 +258,8 @@ def format_trade_message(
     address,
     label,
     position_after=None,
-    position_before_size=0
+    position_before_size=0,
+    pos_before_known=True
 ):
     coin = trade.get("coin", "Unknown")
     side = trade.get("side", "B")
@@ -295,6 +286,10 @@ def format_trade_message(
     pnl_emoji = "🟢" if upnl >= 0 else "🔴"
 
     pos_before = float(position_before_size)
+
+    # If we don't know pos_before (cache miss), infer it
+    if not pos_before_known:
+        pos_before = infer_pos_before(trade, pos_sz)
 
     action, direction, dir_emoji, full_label = determine_action(
         side, pos_before, pos_sz
@@ -341,7 +336,8 @@ def format_summary_message(
     address,
     label,
     asset_positions,
-    prev_pos_map
+    prev_pos_map,
+    prev_pos_known=True
 ):
     wallet_name = (
         label.upper() if label
@@ -356,9 +352,30 @@ def format_summary_message(
     start_time = to_nepal_time(min(times))
     end_time = to_nepal_time(max(times))
 
+    # ── If prev_pos not known, infer from current positions + trades ──
+    effective_prev = dict(prev_pos_map)
+
+    if not prev_pos_known:
+        # Work backwards: current_pos - all trade effects = start pos
+        for coin, ctrades in coin_trades.items():
+            current_pos_detail = get_position_details(coin, asset_positions)
+            current_sz = float(current_pos_detail.get("szi", 0) or 0)
+
+            # Reverse all trades to get starting position
+            start_pos = current_sz
+            for t in reversed(ctrades):
+                side = t.get("side", "B")
+                sz = float(t.get("sz", 0))
+                if side == "B":
+                    start_pos -= sz  # undo buy
+                else:
+                    start_pos += sz  # undo sell
+
+            effective_prev[coin] = start_pos
+
     # ── Build trades with context for smart header ──
     trades_with_context = []
-    temp_positions = dict(prev_pos_map)
+    temp_positions = dict(effective_prev)
 
     for trade in sorted(trades, key=lambda x: x.get("time", 0)):
         coin = trade.get("coin", "")
@@ -374,7 +391,7 @@ def format_summary_message(
         trades_with_context.append((trade, pb, pa))
         temp_positions[coin] = pa
 
-    # ── Smart header ────────────────────────────────
+    # ── Smart header ──
     smart_header = get_summary_header(trades_with_context)
 
     msg = f"👁️ *{wallet_name}*\n"
@@ -386,10 +403,9 @@ def format_summary_message(
     msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
 
     for coin, ctrades in coin_trades.items():
-        # Determine coin-level direction
-        running_pos = prev_pos_map.get(coin, 0)
+        running_pos = effective_prev.get(coin, 0)
 
-        # Calculate what happens across all trades for this coin
+        # Simulate final position
         sim_pos = running_pos
         for t in ctrades:
             s = t.get("side", "B")
@@ -398,11 +414,14 @@ def format_summary_message(
                 sim_pos += sz
             else:
                 sim_pos -= sz
-
         final_pos = sim_pos
 
-        # Coin header
-        if running_pos == 0 and final_pos > 0:
+        # ── Coin header with correct action ──
+        if (running_pos > 0 and final_pos < 0) or \
+           (running_pos < 0 and final_pos > 0):
+            d = "LONG" if final_pos > 0 else "SHORT"
+            coin_header = f"🔄 *{coin}/USDC* — FLIP → {d}"
+        elif running_pos == 0 and final_pos > 0:
             coin_header = f"🟢 *{coin}/USDC* — LONG OPEN"
         elif running_pos == 0 and final_pos < 0:
             coin_header = f"🔴 *{coin}/USDC* — SHORT OPEN"
@@ -420,17 +439,13 @@ def format_summary_message(
                 coin_header = f"🔴 *{coin}/USDC* — SHORT INCREASE"
             else:
                 coin_header = f"🔴 *{coin}/USDC* — SHORT REDUCE"
-        elif (running_pos > 0 and final_pos < 0):
-            coin_header = f"🔄 *{coin}/USDC* — FLIP → SHORT"
-        elif (running_pos < 0 and final_pos > 0):
-            coin_header = f"🔄 *{coin}/USDC* — FLIP → LONG"
         else:
-            coin_header = f"⚡ *{coin}/USDC*"
+            coin_header = f"⚡ *{coin}/USDC* — TRADE"
 
         msg += f"{coin_header}"
         msg += f" — {len(ctrades)} Trade{'s' if len(ctrades) > 1 else ''}\n"
 
-        # Trade tree
+        # ── Trade tree ──
         r_pos = running_pos
         for i, trade in enumerate(ctrades):
             side = trade.get("side", "B")
@@ -457,7 +472,7 @@ def format_summary_message(
             )
             msg += f"  🕐 `{trade_time}`\n"
 
-        # Current position state
+        # ── Current position state ──
         pos = get_position_details(coin, asset_positions)
         if pos and float(pos.get("szi", 0) or 0) != 0:
             pos_size = float(pos.get("szi", 0) or 0)
@@ -560,7 +575,7 @@ async def check_wallet(session, address, chat_ids, labels, bot):
     position_data = await fetch_positions(session, address)
     asset_positions = position_data.get("assetPositions", [])
 
-    # Store SIGNED sizes (positive=LONG, negative=SHORT)
+    # Store SIGNED sizes
     current_positions = {}
     for p in asset_positions:
         pos = p.get("position", {})
@@ -570,6 +585,8 @@ async def check_wallet(session, address, chat_ids, labels, bot):
             current_positions[coin] = size
 
     prev_pos_map = previous_positions.get(address, {})
+    # Check if we actually have cached positions
+    have_prev = len(prev_pos_map) > 0 or address in previous_positions
 
     trades = await fetch_trades(session, address)
     if not trades:
@@ -607,6 +624,40 @@ async def check_wallet(session, address, chat_ids, labels, bot):
         f"📊 {address[:8]} — {len(new_trades)} new trade(s)"
     )
 
+    # ── If no cached prev positions, INFER them ──
+    if not have_prev:
+        logger.info(f"🔄 {address[:8]} — No cached positions, inferring from trades")
+        inferred_prev = {}
+
+        # Group new trades by coin
+        coin_new_trades = defaultdict(list)
+        for t in new_trades:
+            coin_new_trades[t.get("coin", "")].append(t)
+
+        for coin, ctrades in coin_new_trades.items():
+            # Get current live position
+            current_sz = current_positions.get(coin, 0)
+
+            # Reverse all new trades to find starting position
+            start_pos = current_sz
+            for t in reversed(ctrades):
+                side = t.get("side", "B")
+                sz = float(t.get("sz", 0))
+                if side == "B":
+                    start_pos -= sz  # undo buy
+                else:
+                    start_pos += sz  # undo sell
+
+            inferred_prev[coin] = start_pos
+
+        # Also include coins in current_positions not in trades
+        for coin, sz in current_positions.items():
+            if coin not in inferred_prev:
+                inferred_prev[coin] = sz
+
+        prev_pos_map = inferred_prev
+        logger.info(f"🔄 {address[:8]} — Inferred prev positions: {prev_pos_map}")
+
     if len(new_trades) <= MAX_INDIVIDUAL_TRADES:
         # Simulate signed position step by step
         running_positions = dict(prev_pos_map)
@@ -619,24 +670,36 @@ async def check_wallet(session, address, chat_ids, labels, bot):
             # Signed position BEFORE this trade
             pos_before_size = running_positions.get(coin, 0)
 
+            # Check if we actually knew this coin
+            coin_known = coin in running_positions
+
             # Simulate signed position AFTER this trade
             if side == "B":
                 simulated_after = pos_before_size + sz
             else:
                 simulated_after = pos_before_size - sz
 
-            # Update running for next trade
             running_positions[coin] = simulated_after
 
-            # Get live position details for display
+            # Get live position for display info
             pos_details = get_position_details(coin, asset_positions)
+
+            # If coin wasn't in prev cache, infer
+            if not coin_known:
+                pos_sz = float(pos_details.get("szi", 0) or 0)
+                pos_before_size = infer_pos_before(trade, pos_sz)
+                logger.info(
+                    f"🔄 Inferred {coin} pos_before={pos_before_size:.4f} "
+                    f"(side={side}, sz={sz}, pos_after={pos_sz})"
+                )
 
             message = format_trade_message(
                 trade,
                 address,
                 label,
                 position_after=pos_details,
-                position_before_size=pos_before_size
+                position_before_size=pos_before_size,
+                pos_before_known=True
             )
 
             for chat_id in valid_chats:
@@ -652,7 +715,8 @@ async def check_wallet(session, address, chat_ids, labels, bot):
             address,
             label,
             asset_positions,
-            prev_pos_map
+            prev_pos_map,
+            prev_pos_known=True
         )
         if len(summary) > 4000:
             coin_trades = defaultdict(list)
@@ -665,7 +729,8 @@ async def check_wallet(session, address, chat_ids, labels, bot):
                     address,
                     label,
                     asset_positions,
-                    prev_pos_map
+                    prev_pos_map,
+                    prev_pos_known=True
                 )
                 for chat_id in valid_chats:
                     await queue_message(chat_id, coin_summary)
