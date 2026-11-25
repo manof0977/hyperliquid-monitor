@@ -1,0 +1,11 @@
+{
+  "name": "binance-crypto-intelligence-scanner-root",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "install:frontend": "npm --prefix frontend install",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build",
+    "start": "bash start.sh"
+  }
+}

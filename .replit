@@ -1,0 +1,22 @@
+run = "bash start.sh"
+modules = ["python-3.11", "nodejs-20"]
+
+[nix]
+channel = "stable-24_05"
+
+[env]
+PYTHONPATH = "backend"
+DB_PATH = "./data/scanner.db"
+
+[[ports]]
+localPort = 5173
+externalPort = 80
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+
+[deployment]
+deploymentTarget = "vm"
+build = ["sh", "-c", "pip install -r requirements.txt && npm --prefix frontend install && npm --prefix frontend run build"]
+run = ["sh", "-c", "bash start.sh prod"]
