@@ -1,1 +1,1 @@
-worker: python bot.py
+web: bash start.sh prod
