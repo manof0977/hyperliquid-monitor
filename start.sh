@@ -14,7 +14,7 @@ fi
 MODE="${1:-dev}"
 
 if [ "$MODE" = "prod" ]; then
-  if [ ! -d "$ROOT_DIR/frontend/dist" ]; then
+  if [ ! -f "$ROOT_DIR/backend/static/index.html" ] && [ ! -d "$ROOT_DIR/frontend/dist" ]; then
     npm --prefix frontend install --no-audit --no-fund
     npm --prefix frontend run build
   fi
