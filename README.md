@@ -44,7 +44,23 @@ tests/test_analysis.py   # Pytest suite verifying non-repainting structure, SMC,
 
 ---
 
-## Running on Replit / Locally
+## One-Click Launch on Your Own PC (Windows / Mac / Zero-Install Webpage)
+
+Download the repo as a **ZIP** from GitHub (`Code` → `Download ZIP`), unzip it anywhere on your computer, and pick whichever way you prefer:
+
+1. **Double-Click Windows App Mode (`run_scanner.bat`) — Recommended**
+   - Double-click **`run_scanner.bat`**.
+   - If Python 3.10+ is installed, it automatically sets up `.venv` on first run, starts the full FastAPI + SQLite + Backtesting engine, and pops open Chrome/Edge in standalone **App Window** mode (`--app=http://127.0.0.1:8000`) — no Node.js needed because the production UI is pre-built in `backend/static/`.
+   - If Python is **not** installed on your PC, `run_scanner.bat` automatically opens **`Binance_Scanner_Standalone.html`** in Chrome instead!
+   - Optional: double-click **`create_desktop_shortcut.bat`** once to place a **"Binance Intelligence Scanner"** icon right on your Windows Desktop.
+2. **Zero-Install Single Webpage (`Binance_Scanner_Standalone.html`)**
+   - Double-click **`Binance_Scanner_Standalone.html`** directly on any computer (Windows, Mac, Chromebook — zero installs). It opens in Chrome and connects straight to Binance's public REST + WebSocket APIs with live Lightweight Charts, 3L/3R swings, BOS/CHoCH, Order Blocks, FVGs, Sweeps, and Long/Short scoring.
+3. **Mac / Linux One-Click (`run_scanner.command`)**
+   - Double-click **`run_scanner.command`** on macOS (or `./run_scanner.command` on Linux).
+
+---
+
+## Running on Replit / Cloud
 
 ### Development Mode (Backend + Vite HMR Proxy)
 ```bash

@@ -45,8 +45,12 @@ app.add_middleware(
 )
 app.include_router(router)
 
-DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
-if os.path.isdir(DIST_DIR):
+_STATIC_CANDIDATES = [
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static")),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")),
+]
+DIST_DIR = next((d for d in _STATIC_CANDIDATES if os.path.isfile(os.path.join(d, "index.html"))), None)
+if DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.isdir(assets_dir):
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")

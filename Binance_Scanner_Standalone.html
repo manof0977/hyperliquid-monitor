@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Binance Crypto Intelligence Scanner — Standalone Edition</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    :root {
+      --bg:#070a10; --panel:#0e1420; --panel2:#131b2b; --border:#1e293b;
+      --text:#e2e8f0; --muted:#8b9bb4; --bull:#10b981; --bear:#ef4444; --accent:#38bdf8; --amber:#f59e0b;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:Inter,-apple-system,Segoe UI,Roboto,sans-serif;font-size:13.5px}
+    .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+    .bull{color:var(--bull)} .bear{color:var(--bear)} .accent{color:var(--accent)} .muted{color:var(--muted)}
+    .shell{display:flex;min-height:100vh}
+    aside{width:225px;background:var(--panel);border-right:1px solid var(--border);padding:16px 12px;display:flex;flex-direction:column;flex-shrink:0}
+    .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 16px;border-bottom:1px solid var(--border)}
+    .bdot{width:11px;height:11px;border-radius:50%;background:var(--amber);box-shadow:0 0 10px var(--amber)}
+    nav{display:flex;flex-direction:column;gap:4px;margin-top:14px;flex:1}
+    nav button{text-align:left;background:transparent;color:var(--muted);border:1px solid transparent;padding:9px 12px;border-radius:6px;cursor:pointer;font-weight:600}
+    nav button:hover{background:var(--panel2);color:var(--text)}
+    nav button.active{background:rgba(56,189,248,.13);color:var(--accent);border-color:rgba(56,189,248,.3)}
+    main{flex:1;padding:20px 24px 40px;min-width:0;overflow-x:hidden}
+    h1{margin:0 0 4px;font-size:20px}
+    .toprow{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+    .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;margin-bottom:16px}
+    .kpi{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:13px 15px}
+    .kpi .lbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+    .kpi .val{font-size:23px;font-weight:800;margin-top:4px;font-family:ui-monospace,monospace}
+    .panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:16px}
+    .two{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px}
+    .btn{background:var(--panel2);color:var(--text);border:1px solid var(--border);padding:8px 14px;border-radius:6px;cursor:pointer;font-weight:600}
+    .btn.primary{background:#0284c7;border-color:#0ea5e9;color:#fff}
+    .input,select{background:var(--panel2);color:var(--text);border:1px solid var(--border);padding:7px 10px;border-radius:6px}
+    .filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+    .tblwrap{overflow-x:auto;background:var(--panel);border:1px solid var(--border);border-radius:8px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px 10px;text-align:left;border-bottom:1px solid rgba(30,41,59,.7);white-space:nowrap}
+    th{font-size:11px;text-transform:uppercase;color:var(--muted);background:rgba(19,27,43,.7)}
+    tr.click:hover{background:rgba(56,189,248,.07);cursor:pointer}
+    .pill{display:inline-block;padding:2px 6px;border-radius:4px;font-size:10.5px;font-weight:700;font-family:ui-monospace,monospace}
+    .pill.BULLISH{background:rgba(16,185,129,.16);color:#34d399}
+    .pill.BEARISH{background:rgba(239,68,68,.16);color:#f87171}
+    .pill.NEUTRAL{background:rgba(148,163,184,.12);color:#94a3b8}
+    .badge{padding:3px 7px;border-radius:4px;font-size:10.5px;font-weight:700;display:inline-block;margin-right:4px}
+    .b-lconf{background:rgba(16,185,129,.25);color:#6ee7b7;border:1px solid rgba(16,185,129,.5)}
+    .b-sconf{background:rgba(239,68,68,.25);color:#fca5a5;border:1px solid rgba(239,68,68,.5)}
+    .b-dev{background:rgba(56,189,248,.15);color:#7dd3fc}
+    .b-early{background:rgba(245,158,11,.2);color:#fcd34d;border:1px solid rgba(245,158,11,.45)}
+    .b-none{background:rgba(148,163,184,.1);color:#64748b}
+    .sbar{height:4px;background:#1e293b;border-radius:2px;width:64px;overflow:hidden;margin-top:3px}
+    .sbar div{height:100%}
+    .analysis-grid{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:16px;align-items:start}
+    @media(max-width:1050px){.analysis-grid{grid-template-columns:1fr}}
+    #chartStage{position:relative;width:100%;height:520px}
+    #overlayCanvas{position:absolute;inset:0;pointer-events:none;z-index:5}
+    .tfbar{display:inline-flex;gap:4px;background:var(--panel);padding:4px;border-radius:6px;border:1px solid var(--border)}
+    .tfbar button{background:transparent;border:none;color:var(--muted);padding:5px 10px;border-radius:4px;cursor:pointer;font-weight:700}
+    .tfbar button.active{background:var(--accent);color:#04111d}
+    .kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px dashed rgba(148,163,184,.12);font-size:12.5px}
+    .hide{display:none!important}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside>
+    <div class="brand">
+      <div class="bdot"></div>
+      <div>
+        <div style="font-weight:800;font-size:13px;letter-spacing:.05em">BINANCE INTEL</div>
+        <div class="muted" style="font-size:10.5px">STANDALONE WEBPAGE</div>
+      </div>
+    </div>
+    <nav id="nav">
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="scanner">Market Scanner</button>
+      <button data-tab="opps">Top Opportunities</button>
+      <button data-tab="coin">Coin Analysis</button>
+      <button data-tab="watch">Watchlist</button>
+    </nav>
+    <div style="border-top:1px solid var(--border);padding-top:12px;font-size:12px">
+      <div id="connStatus" class="muted">Connecting to Binance…</div>
+      <div id="scanCount" class="muted" style="margin-top:5px">Scanned: 0</div>
+    </div>
+  </aside>
+
+  <main>
+    <!-- DASHBOARD -->
+    <section id="tab-dashboard">
+      <div class="toprow">
+        <div>
+          <h1>Binance USDT-M Perpetual Intelligence</h1>
+          <div class="muted">Zero-Install Standalone Browser Edition • Real Binance REST + WebSocket • SMC, Structure & Dual Scoring</div>
+        </div>
+        <button class="btn primary" id="rescanBtn">Rescan Top Pairs</button>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="lbl">Coins Scanned</div><div class="val" id="kScanned">0</div><div class="muted" id="kElig" style="font-size:11px">0 USDT perps</div></div>
+        <div class="kpi"><div class="lbl">Long Candidates</div><div class="val bull" id="kLong">0</div></div>
+        <div class="kpi"><div class="lbl">Short Candidates</div><div class="val bear" id="kShort">0</div></div>
+        <div class="kpi"><div class="lbl">Confirmed Setups</div><div class="val accent" id="kConf">0</div></div>
+        <div class="kpi"><div class="lbl">Early Watch</div><div class="val" style="color:var(--amber)" id="kEarly">0</div></div>
+      </div>
+      <div class="two">
+        <div class="panel">
+          <h3 style="margin:0 0 10px">Highest Opportunity Setups</h3>
+          <table><thead><tr><th>Symbol</th><th>Price</th><th>24H</th><th>Long Opp</th><th>Short Opp</th><th>Status</th></tr></thead><tbody id="dashTop"></tbody></table>
+        </div>
+        <div class="panel">
+          <h3 style="margin:0 0 10px">Early Watch Pre-Breakout Radar</h3>
+          <div id="dashEarly" class="muted">Scanning live candles…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCANNER -->
+    <section id="tab-scanner" class="hide">
+      <div class="toprow"><h1>USDT Perpetual Market Scanner</h1></div>
+      <div class="filters">
+        <input class="input" id="qSearch" placeholder="Search symbol (BTC, SOL, ETH)…" />
+        <select id="qSort">
+          <option value="best_opp">Sort: Highest Opportunity</option>
+          <option value="long_tech">Sort: Highest Long Technical</option>
+          <option value="short_tech">Sort: Highest Short Technical</option>
+          <option value="vol">Sort: 24H Volume</option>
+        </select>
+        <label class="muted"><input type="checkbox" id="qEarly" /> Early Watch Only</label>
+      </div>
+      <div class="tblwrap">
+        <table>
+          <thead><tr><th>★</th><th>Symbol</th><th>Price</th><th>24H</th><th>24H Vol</th><th>1D</th><th>4H</th><th>1H</th><th>15M</th><th>Long Tech</th><th>Short Tech</th><th>Long Opp</th><th>Short Opp</th><th>Status</th></tr></thead>
+          <tbody id="scanBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- TOP OPPS -->
+    <section id="tab-opps" class="hide">
+      <div class="toprow"><h1>Top 20 Qualifying Opportunities (Score ≥ 60)</h1></div>
+      <div class="two">
+        <div class="panel"><h3 class="bull" style="margin:0 0 10px">LONG Rankings</h3><table><thead><tr><th>#</th><th>Symbol</th><th>Price</th><th>Tech</th><th>Opp</th><th>R:R</th><th>Status</th></tr></thead><tbody id="oppLong"></tbody></table></div>
+        <div class="panel"><h3 class="bear" style="margin:0 0 10px">SHORT Rankings</h3><table><thead><tr><th>#</th><th>Symbol</th><th>Price</th><th>Tech</th><th>Opp</th><th>R:R</th><th>Status</th></tr></thead><tbody id="oppShort"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- COIN ANALYSIS -->
+    <section id="tab-coin" class="hide">
+      <div class="toprow">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <select id="coinSel" style="font-weight:700;font-size:15px"></select>
+          <span id="coinPrice" class="mono" style="font-size:20px;font-weight:800">—</span>
+          <span id="coinStatus"></span>
+        </div>
+        <div class="tfbar" id="tfBar">
+          <button data-tf="5m">5M</button><button data-tf="15m">15M</button>
+          <button data-tf="1h" class="active">1H</button><button data-tf="4h">4H</button>
+          <button data-tf="1d">1D</button><button data-tf="1w">1W</button>
+        </div>
+      </div>
+      <div class="analysis-grid">
+        <div class="panel" style="padding:8px">
+          <div id="chartStage"><canvas id="overlayCanvas"></canvas></div>
+        </div>
+        <div>
+          <div class="panel"><h3 style="margin:0 0 10px">Timeframe Biases</h3><div id="coinBiases" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px"></div></div>
+          <div class="panel"><h3 style="margin:0 0 10px">Structural Trade Plan</h3><div id="coinPlan"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- WATCHLIST -->
+    <section id="tab-watch" class="hide">
+      <div class="toprow"><h1>Watchlist</h1></div>
+      <div class="tblwrap"><table><thead><tr><th>Symbol</th><th>Price</th><th>24H</th><th>Long Opp</th><th>Short Opp</th><th>Status</th></tr></thead><tbody id="watchBody"></tbody></table></div>
+    </section>
+  </main>
+</div>
+
+<script>
+const ENDPOINTS = [
+  { label:'fapi.binance.com (Futures)', rest:'https://fapi.binance.com/fapi/v1', ws:'wss://fstream.binance.com', fut:true },
+  { label:'data-api.binance.vision', rest:'https://data-api.binance.vision/api/v3', ws:'wss://data-stream.binance.vision:9443', fut:false }
+];
+let EP = ENDPOINTS[0];
+const state = {
+  contracts: [], tickers: new Map(), results: new Map(),
+  watch: new Set(JSON.parse(localStorage.getItem('bn_watch') || '["BTCUSDT","ETHUSDT","SOLUSDT"]')),
+  selectedCoin: 'BTCUSDT', selectedTf: '1h', scanning: false
+};
+
+const fmtP = p => p==null||isNaN(p)?'—':Math.abs(p)>=1000?p.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):Math.abs(p)>=1?p.toFixed(4):p.toPrecision(4);
+const fmtV = v => !v?'$0':v>=1e9?`$${(v/1e9).toFixed(2)}B`:v>=1e6?`$${(v/1e6).toFixed(1)}M`:`$${(v/1e3).toFixed(0)}K`;
+const badgeHtml = (st, early) => {
+  const cls = st.includes('CONFIRMED')?(st.startsWith('LONG')?'b-lconf':'b-sconf'):(st.includes('DEVELOPING')||st.includes('WATCH'))?'b-dev':'b-none';
+  return `<span class="badge ${cls}">${st}</span>${early?'<span class="badge b-early">EARLY WATCH</span>':''}`;
+};
+const scoreHtml = (v, bull) => `<div class="mono" style="font-weight:700">${(v||0).toFixed(1)}<div class="sbar"><div style="width:${Math.min(100,v||0)}%;background:${bull?'var(--bull)':'var(--bear)'}"></div></div></div>`;
+
+// --- Math: EMA, RSI, ATR, 3L/3R Swings, BOS/CHoCH, OB, FVG, Sweeps ---
+function emaArr(vals, p){ const k=2/(p+1), out=[vals[0]]; for(let i=1;i<vals.length;i++) out.push(vals[i]*k + out[i-1]*(1-k)); return out; }
+function rsiArr(c, p=14){
+  let g=0,l=0; const out=new Array(c.length).fill(50);
+  for(let i=1;i<c.length;i++){
+    const d=c[i]-c[i-1], gi=d>0?d:0, li=d<0?-d:0;
+    g = i<=p ? g+gi/p : (g*(p-1)+gi)/p;
+    l = i<=p ? l+li/p : (l*(p-1)+li)/p;
+    if(i>=p) out[i] = l===0 ? 100 : 100 - 100/(1+g/l);
+  }
+  return out;
+}
+function atrArr(h,l,c,p=14){
+  const tr=[h[0]-l[0]];
+  for(let i=1;i<c.length;i++) tr.push(Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1])));
+  return emaArr(tr, p);
+}
+function analyzeCandles(kl){
+  if(!kl || kl.length < 30) return null;
+  const t=kl.map(k=>+k[0]), o=kl.map(k=>+k[1]), h=kl.map(k=>+k[2]), l=kl.map(k=>+k[3]), c=kl.map(k=>+k[4]), v=kl.map(k=>+k[5]);
+  const n=c.length, ema20=emaArr(c,20), ema50=emaArr(c,50), ema100=emaArr(c,100), ema200=emaArr(c,200);
+  const rsi=rsiArr(c,14), atr=atrArr(h,l,c,14), macdH=emaArr(c,12).map((x,i)=>x-emaArr(c,26)[i]);
+  // Causal 3L/3R swings & BOS/CHoCH
+  const byConf={};
+  for(let i=3;i<n-3;i++){
+    if(h[i]>h[i-1]&&h[i]>h[i-2]&&h[i]>h[i-3]&&h[i]>=h[i+1]&&h[i]>=h[i+2]&&h[i]>=h[i+3]) (byConf[i+3]=byConf[i+3]||[]).push({i,kind:'high',p:h[i]});
+    if(l[i]<l[i-1]&&l[i]<l[i-2]&&l[i]<l[i-3]&&l[i]<=l[i+1]&&l[i]<=l[i+2]&&l[i]<=l[i+3]) (byConf[i+3]=byConf[i+3]||[]).push({i,kind:'low',p:l[i]});
+  }
+  const swings=[], breaks=[]; let ph=null, pl=null, ah=null, al=null, trend='neutral';
+  for(let b=0;b<n;b++){
+    for(const s of (byConf[b]||[])){
+      if(s.kind==='high'){ const lbl=ph?(s.p>ph.p?'HH':'LH'):'SH'; const sw={...s,t:t[s.i],lbl}; swings.push(sw); ph=sw; ah=sw; }
+      else { const lbl=pl?(s.p>pl.p?'HL':'LL'):'SL'; const sw={...s,t:t[s.i],lbl}; swings.push(sw); pl=sw; al=sw; }
+    }
+    if(b===n-1) continue;
+    if(ah && c[b]>ah.p){ breaks.push({i:b,t:t[b],st:ah.t,lvl:ah.p,dir:'bullish',kind:trend==='bearish'?'CHoCH':'BOS'}); trend='bullish'; ah=null; }
+    else if(al && c[b]<al.p){ breaks.push({i:b,t:t[b],st:al.t,lvl:al.p,dir:'bearish',kind:trend==='bullish'?'CHoCH':'BOS'}); trend='bearish'; al=null; }
+  }
+  // FVG & OB
+  const fvgs=[], obs=[], sweeps=[];
+  for(let i=2;i<n-1;i++){
+    if(h[i-2]<l[i]){
+      let mit=false, inv=false; for(let k=i+1;k<n;k++){ if(l[k]<=l[i]) mit=true; if(c[k]<h[i-2]){inv=true;break;} }
+      if(!inv&&!mit) fvgs.push({kind:'bullish',t:t[i-1],top:l[i],bot:h[i-2]});
+    } else if(l[i-2]>h[i]){
+      let mit=false, inv=false; for(let k=i+1;k<n;k++){ if(h[k]>=h[i]) mit=true; if(c[k]>l[i-2]){inv=true;break;} }
+      if(!inv&&!mit) fvgs.push({kind:'bearish',t:t[i-1],top:l[i-2],bot:h[i]});
+    }
+  }
+  for(const br of breaks.slice(-12)){
+    for(let j=br.i-1;j>=Math.max(0,br.i-10);j--){
+      if((br.dir==='bullish'&&c[j]<o[j])||(br.dir==='bearish'&&c[j]>o[j])){
+        let inv=false; for(let k=br.i+1;k<n;k++){ if((br.dir==='bullish'&&c[k]<l[j])||(br.dir==='bearish'&&c[k]>h[j])){inv=true;break;} }
+        if(!inv) obs.push({kind:br.dir,t:t[j],top:h[j],bot:l[j]});
+        break;
+      }
+    }
+  }
+  for(const s of swings.slice(-16)){
+    for(let k=s.i+3;k<n;k++){
+      if(s.kind==='high'){ if(h[k]>s.p&&c[k]<s.p){sweeps.push({kind:'bearish',t:t[k],i:k});break;} if(c[k]>s.p)break; }
+      else { if(l[k]<s.p&&c[k]>s.p){sweeps.push({kind:'bullish',t:t[k],i:k});break;} if(c[k]<s.p)break; }
+    }
+  }
+  const cur=c[n-1], curAtr=Math.max(atr[n-1], cur*0.002);
+  const bullStack = ema20[n-1]>ema50[n-1]&&ema50[n-1]>ema100[n-1]&&ema100[n-1]>ema200[n-1];
+  const bearStack = ema20[n-1]<ema50[n-1]&&ema50[n-1]<ema100[n-1]&&ema100[n-1]<ema200[n-1];
+  const bias = (trend==='bullish'&&(bullStack||cur>ema50[n-1]))?'BULLISH':(trend==='bearish'&&(bearStack||cur<ema50[n-1]))?'BEARISH':'NEUTRAL';
+  const volSma = v.slice(-20).reduce((a,b)=>a+b,0)/Math.min(20,v.length);
+  return { t,o,h,l,c,v,ema20,ema50,ema100,ema200,rsi,atr,cur,curAtr,trend,bias,bullStack,bearStack,swings,breaks,fvgs:fvgs.slice(-8),obs:obs.slice(-8),sweeps:sweeps.slice(-8),volRatio:v[n-1]/(volSma||1),macdLast:macdH[n-1],n };
+}
+
+function scoreSymbol(sym, mtf){
+  const p = mtf['1h'] || mtf['15m']; if(!p) return null;
+  const biases = {}; for(const k of Object.keys(mtf)) if(mtf[k]) biases[k]=mtf[k].bias;
+  const evalSide = (isLong) => {
+    const dir = isLong?'bullish':'bearish', tb = isLong?'BULLISH':'BEARISH';
+    let ms = p.trend===dir ? 14 : 0;
+    const lb = p.breaks[p.breaks.length-1];
+    if(lb && lb.dir===dir) ms += 9;
+    let smc = (p.obs.some(x=>x.kind===dir)?10:0) + (p.fvgs.some(x=>x.kind===dir)?7:0) + (p.sweeps.some(x=>x.kind===dir&&(p.n-x.i)<=18)?8:0);
+    let em = (isLong?p.bullStack:p.bearStack)?16:(isLong?p.cur>p.ema50[p.n-1]:p.cur<p.ema50[p.n-1])?9:2;
+    let mom = ((isLong?p.macdLast>0:p.macdLast<0)?7:0) + (p.volRatio>1.25?5:2) + 3;
+    const agree = Object.values(biases).filter(b=>b===tb).length / Math.max(1,Object.keys(biases).length) * 15;
+    const tech = Math.min(100, +(ms + Math.min(25,smc) + Math.min(20,em) + Math.min(15,mom) + agree).toFixed(1));
+
+    // Trade plan from real OB / FVG + structural swing targets
+    const zones = [...p.obs.filter(x=>x.kind===dir), ...p.fvgs.filter(x=>x.kind===dir)]
+      .filter(z => isLong ? z.bot <= p.cur*1.005 : z.top >= p.cur*0.995);
+    if(!zones.length) return { tech, opp:0, rr:0, ez:null, entry:null, inv:null, tgts:[], ltfOk:false, distAtr:99 };
+    zones.sort((a,b)=>Math.min(Math.abs(p.cur-a.top),Math.abs(p.cur-a.bot))-Math.min(Math.abs(p.cur-b.top),Math.abs(p.cur-b.bot)));
+    const z=zones[0], inZ = p.cur>=z.bot && p.cur<=z.top;
+    const entry = inZ ? p.cur : (isLong ? z.top : z.bot);
+    const inv = isLong ? z.bot - 0.3*p.curAtr : z.top + 0.3*p.curAtr;
+    const risk = Math.abs(entry - inv);
+    const cand = p.swings.filter(s => isLong ? (s.kind==='high'&&s.p>entry+0.4*p.curAtr) : (s.kind==='low'&&s.p<entry-0.4*p.curAtr)).map(s=>s.p);
+    cand.sort((a,b)=>isLong?a-b:b-a);
+    const tgts = cand.slice(0,3);
+    const rr = tgts.length && risk>0 ? +(Math.abs(tgts[0]-entry)/risk).toFixed(2) : 0;
+    const distAtr = inZ ? 0 : Math.min(Math.abs(p.cur-z.top),Math.abs(p.cur-z.bot))/p.curAtr;
+    const ltf = mtf['15m'] || mtf['5m'];
+    const ltfLb = ltf && ltf.breaks[ltf.breaks.length-1];
+    const ltfOk = Boolean(ltfLb && ltfLb.dir===dir && (ltf.n - ltfLb.i) <= 14);
+    const opp = Math.min(100, +(Math.max(0,25*(1-distAtr/3)) + (ltfOk?20:9) + Math.min(25, rr*8.5) + 13 + (tgts.length?9:0)).toFixed(1));
+    return { tech, opp, rr, ez:[z.bot,z.top], entry, inv, tgts, ltfOk, distAtr };
+  };
+  const L = evalSide(true), S = evalSide(false);
+  const early = [];
+  for(const ob of p.obs){
+    const d = Math.min(Math.abs(p.cur-ob.top),Math.abs(p.cur-ob.bot))/p.curAtr;
+    if(!(p.cur>=ob.bot&&p.cur<=ob.top) && d<=0.85){ early.push(`Approaching ${ob.kind} OB (${d.toFixed(2)} ATR)`); break; }
+  }
+  if(p.volRatio>=1.5) early.push(`Volume expansion (${p.volRatio.toFixed(1)}x SMA20)`);
+
+  const sideStat = (nm, x) => (x.tech>=60&&x.opp>=70&&x.ltfOk&&x.distAtr<=0.85&&x.rr>=1.5) ? [`${nm} CONFIRMED`,3]
+    : (x.tech>=60&&x.opp>=50&&x.rr>=1.2) ? [`${nm} DEVELOPING`,2]
+    : (x.tech>=40&&(x.opp>=35||early.length)) ? [`${nm} WATCH`,1] : ['NO SETUP',0];
+  const [ls,lr]=sideStat('LONG',L), [ss,sr]=sideStat('SHORT',S);
+  const pickLong = lr>sr || (lr===sr && (L.tech+L.opp)>=(S.tech+S.opp));
+  const status = (lr===0&&sr===0) ? 'NO SETUP' : (pickLong ? ls : ss);
+  const plan = pickLong ? L : S;
+  const tk = state.tickers.get(sym) || { price:p.cur, chg:0, vol:0 };
+  return {
+    symbol:sym, price:tk.price||p.cur, chg:tk.chg||0, vol:tk.vol||0,
+    biases, long_tech:L.tech, short_tech:S.tech, long_opp:L.opp, short_opp:S.opp,
+    long_rr:L.rr, short_rr:S.rr, status, side:pickLong?'LONG':'SHORT',
+    early:early.length>0, earlyReasons:early, plan, mtf
+  };
+}
+
+async function detectEndpoint(){
+  for(const ep of ENDPOINTS){
+    try{ const r=await fetch(`${ep.rest}/ping`); if(r.ok){ EP=ep; return; } }catch{}
+  }
+}
+
+async function scanAll(){
+  if(state.scanning) return;
+  state.scanning = true;
+  document.getElementById('rescanBtn').textContent = 'Scanning Live Binance…';
+  try{
+    await detectEndpoint();
+    document.getElementById('connStatus').innerHTML = `<span class="bull">● LIVE</span> ${EP.label}`;
+    const [inf, tks] = await Promise.all([fetch(`${EP.rest}/exchangeInfo`).then(r=>r.json()), fetch(`${EP.rest}/ticker/24hr`).then(r=>r.json())]);
+    const valid = new Set();
+    for(const s of (inf.symbols||[])){
+      if(s.quoteAsset==='USDT' && s.status==='TRADING' && (!EP.fut || s.contractType==='PERPETUAL')) valid.add(s.symbol);
+    }
+    state.contracts = [...valid];
+    for(const t of tks){
+      if(valid.has(t.symbol)) state.tickers.set(t.symbol, { price:+t.lastPrice, chg:+t.priceChangePercent, vol:+t.quoteVolume });
+    }
+    document.getElementById('kElig').textContent = `${state.contracts.length} USDT pairs`;
+    const ranked = [...valid].sort((a,b)=>(state.tickers.get(b)?.vol||0)-(state.tickers.get(a)?.vol||0)).slice(0, 40);
+    populateSelect(ranked);
+
+    let idx=0;
+    const workers = Array.from({length:4}, async ()=>{
+      while(idx < ranked.length){
+        const sym = ranked[idx++];
+        const mtf = {};
+        await Promise.all(['15m','1h','4h','1d'].map(async tf=>{
+          try{
+            const kl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${tf}&limit=220`).then(r=>r.json());
+            mtf[tf] = analyzeCandles(kl);
+          }catch{}
+        }));
+        const sc = scoreSymbol(sym, mtf);
+        if(sc){ state.results.set(sym, sc); renderAll(); }
+      }
+    });
+    await Promise.all(workers);
+    startWs();
+  }catch(e){
+    document.getElementById('connStatus').innerHTML = `<span class="bear">● Offline</span> (${e.message})`;
+  }finally{
+    state.scanning = false;
+    document.getElementById('rescanBtn').textContent = 'Rescan Top Pairs';
+  }
+}
+
+let wsConn = null;
+function startWs(){
+  if(wsConn) try{wsConn.close();}catch{}
+  wsConn = new WebSocket(`${EP.ws}/ws/!miniTicker@arr`);
+  wsConn.onmessage = ev => {
+    try{
+      const arr = JSON.parse(ev.data);
+      for(const it of arr){
+        const r = state.results.get(it.s);
+        if(r){ r.price = +it.c; r.chg = +it.o>0 ? ((+it.c - +it.o)/+it.o*100) : r.chg; }
+      }
+      renderAll();
+    }catch{}
+  };
+}
+
+function populateSelect(syms){
+  const sel = document.getElementById('coinSel');
+  sel.innerHTML = syms.map(s=>`<option value="${s}" ${s===state.selectedCoin?'selected':''}>${s}</option>`).join('');
+}
+
+function renderAll(){
+  const arr = [...state.results.values()];
+  document.getElementById('scanCount').textContent = `Scanned: ${arr.length} / ${state.contracts.length}`;
+  document.getElementById('kScanned').textContent = arr.length;
+  document.getElementById('kLong').textContent = arr.filter(x=>x.long_tech>=60).length;
+  document.getElementById('kShort').textContent = arr.filter(x=>x.short_tech>=60).length;
+  document.getElementById('kConf').textContent = arr.filter(x=>x.status.includes('CONFIRMED')).length;
+  document.getElementById('kEarly').textContent = arr.filter(x=>x.early).length;
+
+  const byOpp = [...arr].sort((a,b)=>Math.max(b.long_opp,b.short_opp)-Math.max(a.long_opp,a.short_opp));
+  document.getElementById('dashTop').innerHTML = byOpp.slice(0,10).map(r=>`
+    <tr class="click" onclick="openCoin('${r.symbol}')">
+      <td><b>${r.symbol}</b></td><td class="mono">${fmtP(r.price)}</td>
+      <td class="mono ${r.chg>=0?'bull':'bear'}">${r.chg>=0?'+':''}${r.chg.toFixed(2)}%</td>
+      <td>${scoreHtml(r.long_opp,true)}</td><td>${scoreHtml(r.short_opp,false)}</td>
+      <td>${badgeHtml(r.status,r.early)}</td>
+    </tr>`).join('');
+
+  const earlyArr = arr.filter(x=>x.early);
+  document.getElementById('dashEarly').innerHTML = earlyArr.length ? earlyArr.slice(0,8).map(r=>`
+    <div onclick="openCoin('${r.symbol}')" style="background:var(--panel2);padding:9px 11px;border-radius:6px;margin-bottom:7px;cursor:pointer">
+      <div style="display:flex;justify-content:space-between"><b>${r.symbol}</b><span class="mono">${fmtP(r.price)}</span>${badgeHtml(r.status,true)}</div>
+      <div style="color:#fcd34d;font-size:12px;margin-top:4px">${r.earlyReasons.join(' • ')}</div>
+    </div>`).join('') : 'No coins currently inside pre-breakout Early Watch zone.';
+
+  // Market Scanner
+  const q = document.getElementById('qSearch').value.trim().toUpperCase();
+  const sort = document.getElementById('qSort').value;
+  const eo = document.getElementById('qEarly').checked;
+  let rows = arr.filter(r => (!q || r.symbol.includes(q)) && (!eo || r.early));
+  rows.sort((a,b)=> sort==='long_tech'?b.long_tech-a.long_tech : sort==='short_tech'?b.short_tech-a.short_tech : sort==='vol'?b.vol-a.vol : Math.max(b.long_opp,b.short_opp)-Math.max(a.long_opp,a.short_opp));
+  document.getElementById('scanBody').innerHTML = rows.map(r=>`
+    <tr class="click" onclick="openCoin('${r.symbol}')">
+      <td onclick="event.stopPropagation();toggleW('${r.symbol}')" style="color:${state.watch.has(r.symbol)?'var(--amber)':'var(--muted)'};font-size:15px">${state.watch.has(r.symbol)?'★':'☆'}</td>
+      <td><b>${r.symbol}</b></td><td class="mono">${fmtP(r.price)}</td>
+      <td class="mono ${r.chg>=0?'bull':'bear'}">${r.chg>=0?'+':''}${r.chg.toFixed(2)}%</td>
+      <td class="mono muted">${fmtV(r.vol)}</td>
+      <td><span class="pill ${r.biases['1d']||'NEUTRAL'}">${(r.biases['1d']||'NEUT').slice(0,4)}</span></td>
+      <td><span class="pill ${r.biases['4h']||'NEUTRAL'}">${(r.biases['4h']||'NEUT').slice(0,4)}</span></td>
+      <td><span class="pill ${r.biases['1h']||'NEUTRAL'}">${(r.biases['1h']||'NEUT').slice(0,4)}</span></td>
+      <td><span class="pill ${r.biases['15m']||'NEUTRAL'}">${(r.biases['15m']||'NEUT').slice(0,4)}</span></td>
+      <td>${scoreHtml(r.long_tech,true)}</td><td>${scoreHtml(r.short_tech,false)}</td>
+      <td>${scoreHtml(r.long_opp,true)}</td><td>${scoreHtml(r.short_opp,false)}</td>
+      <td>${badgeHtml(r.status,r.early)}</td>
+    </tr>`).join('');
+
+  // Top Opps
+  const longs = arr.filter(x=>x.long_tech>=60&&x.long_opp>=35).sort((a,b)=>(b.long_opp+b.long_tech)-(a.long_opp+a.long_tech)).slice(0,20);
+  const shorts = arr.filter(x=>x.short_tech>=60&&x.short_opp>=35).sort((a,b)=>(b.short_opp+b.short_tech)-(a.short_opp+a.short_tech)).slice(0,20);
+  document.getElementById('oppLong').innerHTML = longs.map((r,i)=>`<tr class="click" onclick="openCoin('${r.symbol}')"><td class="muted">${i+1}</td><td><b>${r.symbol}</b></td><td class="mono">${fmtP(r.price)}</td><td>${scoreHtml(r.long_tech,true)}</td><td>${scoreHtml(r.long_opp,true)}</td><td class="mono">${r.long_rr}R</td><td>${badgeHtml(r.status,r.early)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No qualifying LONG setups ≥ 60 yet.</td></tr>';
+  document.getElementById('oppShort').innerHTML = shorts.map((r,i)=>`<tr class="click" onclick="openCoin('${r.symbol}')"><td class="muted">${i+1}</td><td><b>${r.symbol}</b></td><td class="mono">${fmtP(r.price)}</td><td>${scoreHtml(r.short_tech,false)}</td><td>${scoreHtml(r.short_opp,false)}</td><td class="mono">${r.short_rr}R</td><td>${badgeHtml(r.status,r.early)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No qualifying SHORT setups ≥ 60 yet.</td></tr>';
+
+  // Watchlist
+  document.getElementById('watchBody').innerHTML = [...state.watch].map(s=>{
+    const r = state.results.get(s); if(!r) return '';
+    return `<tr class="click" onclick="openCoin('${s}')"><td><b>${s}</b></td><td class="mono">${fmtP(r.price)}</td><td class="mono ${r.chg>=0?'bull':'bear'}">${r.chg.toFixed(2)}%</td><td>${scoreHtml(r.long_opp,true)}</td><td>${scoreHtml(r.short_opp,false)}</td><td>${badgeHtml(r.status,r.early)}</td></tr>`;
+  }).join('');
+}
+
+window.toggleW = sym => { state.watch.has(sym)?state.watch.delete(sym):state.watch.add(sym); localStorage.setItem('bn_watch',JSON.stringify([...state.watch])); renderAll(); };
+window.openCoin = sym => { state.selectedCoin = sym; switchTab('coin'); loadCoinChart(); };
+
+let chartObj = null;
+async function loadCoinChart(){
+  const sym = state.selectedCoin, tf = state.selectedTf;
+  document.getElementById('coinSel').value = sym;
+  const kl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${tf}&limit=260`).then(r=>r.json());
+  const d = analyzeCandles(kl); if(!d) return;
+  const sum = state.results.get(sym);
+  document.getElementById('coinPrice').textContent = fmtP(d.cur);
+  document.getElementById('coinStatus').innerHTML = sum ? badgeHtml(sum.status, sum.early) : '';
+  document.getElementById('coinBiases').innerHTML = ['1d','4h','1h','15m'].map(k=>`<div style="background:var(--panel2);padding:7px;border-radius:6px;display:flex;justify-content:space-between"><span class="muted">${k.toUpperCase()}</span><span class="pill ${sum?.biases[k]||'NEUTRAL'}">${(sum?.biases[k]||'NEUT').slice(0,4)}</span></div>`).join('');
+  const pl = sum?.plan;
+  document.getElementById('coinPlan').innerHTML = `
+    <div class="kv"><span class="muted">Active Side</span><b>${sum?.side||'—'}</b></div>
+    <div class="kv"><span class="muted">Entry Zone</span><b class="mono">${pl?.ez?`${fmtP(pl.ez[0])} – ${fmtP(pl.ez[1])}`:'—'}</b></div>
+    <div class="kv"><span class="muted">Suggested Entry</span><b class="mono accent">${fmtP(pl?.entry)}</b></div>
+    <div class="kv"><span class="muted">Invalidation (SL)</span><b class="mono bear">${fmtP(pl?.inv)}</b></div>
+    <div class="kv"><span class="muted">Target 1</span><b class="mono bull">${fmtP(pl?.tgts?.[0])}</b></div>
+    <div class="kv"><span class="muted">Target 2</span><b class="mono bull">${fmtP(pl?.tgts?.[1])}</b></div>
+    <div class="kv"><span class="muted">Risk / Reward</span><b class="mono">${pl?.rr?pl.rr+'R':'—'}</b></div>
+    <div class="kv"><span class="muted">RSI(14) / Trend</span><b class="mono">${d.rsi[d.n-1].toFixed(1)} / ${d.trend.toUpperCase()}</b></div>`;
+
+  const stage = document.getElementById('chartStage');
+  if(chartObj){ chartObj.remove(); chartObj = null; }
+  const chart = LightweightCharts.createChart(stage, {
+    width: stage.clientWidth, height: 520,
+    layout:{ background:{ color:'#0b0f17' }, textColor:'#94a3b8' },
+    grid:{ vertLines:{ color:'rgba(148,163,184,0.06)' }, horzLines:{ color:'rgba(148,163,184,0.06)' } },
+    timeScale:{ timeVisible:true }
+  });
+  chartObj = chart;
+  const cs = chart.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444' });
+  cs.setData(d.t.map((tm,i)=>({ time:Math.floor(tm/1000), open:d.o[i], high:d.h[i], low:d.l[i], close:d.c[i] })));
+  [['ema20','#38bdf8'],['ema50','#f59e0b'],['ema100','#a855f7'],['ema200','#e2e8f0']].forEach(([k,col])=>{
+    const ls = chart.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false });
+    ls.setData(d.t.map((tm,i)=>({ time:Math.floor(tm/1000), value:d[k][i] })));
+  });
+  const markers = [
+    ...d.swings.slice(-20).map(s=>({ time:Math.floor(s.t/1000), position:s.kind==='high'?'aboveBar':'belowBar', color:(s.lbl==='HH'||s.lbl==='HL')?'#22c55e':'#f87171', shape:s.kind==='high'?'arrowDown':'arrowUp', text:s.lbl })),
+    ...d.breaks.slice(-12).map(b=>({ time:Math.floor(b.t/1000), position:b.dir==='bullish'?'belowBar':'aboveBar', color:b.kind==='CHoCH'?'#fbbf24':'#38bdf8', shape:'circle', text:b.kind })),
+    ...d.sweeps.map(w=>({ time:Math.floor(w.t/1000), position:w.kind==='bullish'?'belowBar':'aboveBar', color:'#38bdf8', shape:'square', text:'SWEEP' }))
+  ].sort((a,b)=>a.time-b.time);
+  cs.setMarkers(markers);
+  if(pl?.entry) cs.createPriceLine({ price:pl.entry, color:'#38bdf8', lineWidth:2, title:'ENTRY' });
+  if(pl?.inv) cs.createPriceLine({ price:pl.inv, color:'#ef4444', lineWidth:2, title:'SL' });
+  (pl?.tgts||[]).forEach((tp,i)=>cs.createPriceLine({ price:tp, color:'#10b981', lineWidth:1, lineStyle:2, title:`TP${i+1}` }));
+
+  const cvs = document.getElementById('overlayCanvas');
+  const draw = ()=>{
+    cvs.width = stage.clientWidth; cvs.height = 520;
+    const ctx = cvs.getContext('2d'); ctx.clearRect(0,0,cvs.width,520);
+    const ts = chart.timeScale(), rx = ts.timeToCoordinate(Math.floor(d.t[d.n-1]/1000)) ?? cvs.width-60;
+    const box = (t1,top,bot,fill,str,lbl)=>{
+      const x1=ts.timeToCoordinate(Math.floor(t1/1000))??0, y1=cs.priceToCoordinate(top), y2=cs.priceToCoordinate(bot);
+      if(y1==null||y2==null) return;
+      const y=Math.min(y1,y2), bh=Math.max(2,Math.abs(y2-y1));
+      ctx.fillStyle=fill; ctx.fillRect(x1,y,Math.max(20,rx-x1),bh);
+      ctx.strokeStyle=str; ctx.strokeRect(x1,y,Math.max(20,rx-x1),bh);
+      ctx.fillStyle=str; ctx.font='10px monospace'; ctx.fillText(lbl,x1+4,y+11);
+    };
+    d.obs.forEach(ob=>box(ob.t,ob.top,ob.bot,ob.kind==='bullish'?'rgba(16,185,129,.14)':'rgba(239,68,68,.14)',ob.kind==='bullish'?'#10b981':'#ef4444',`${ob.kind==='bullish'?'Bull':'Bear'} OB`));
+    d.fvgs.forEach(g=>box(g.t,g.top,g.bot,'rgba(56,189,248,.12)','#38bdf8','FVG'));
+  };
+  chart.timeScale().subscribeVisibleLogicalRangeChange(draw);
+  chart.subscribeCrosshairMove(draw);
+  setTimeout(draw, 60);
+}
+
+function switchTab(id){
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active', b.dataset.tab===id));
+  ['dashboard','scanner','opps','coin','watch'].forEach(t=>document.getElementById('tab-'+t).classList.toggle('hide', t!==id));
+  if(id==='coin') loadCoinChart();
+}
+document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+document.querySelectorAll('#tfBar button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#tfBar button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); state.selectedTf=b.dataset.tf; loadCoinChart();
+});
+document.getElementById('coinSel').onchange = e => { state.selectedCoin = e.target.value; loadCoinChart(); };
+document.getElementById('rescanBtn').onclick = scanAll;
+['qSearch','qSort','qEarly'].forEach(id=>document.getElementById(id).oninput=renderAll);
+
+scanAll();
+</script>
+</body>
+</html>
