@@ -76,6 +76,20 @@ export interface CandlePoint {
   rsi14: number | null;
 }
 
+export interface ExplanationSection {
+  title: string;
+  summary: string;
+  bullets: string[];
+}
+
+export interface ExplanationReport {
+  symbol: string;
+  tf: string;
+  tone: 'bullish' | 'bearish' | 'warning' | 'neutral';
+  headline: string;
+  sections: ExplanationSection[];
+}
+
 export interface CoinPayload {
   symbol: string;
   tf: string;
@@ -106,6 +120,7 @@ export interface CoinPayload {
     div: Record<string, boolean>;
   } | null;
   summary: ScanRow | null;
+  explanation?: ExplanationReport | null;
 }
 
 export async function apiGet<T>(path: string): Promise<T> {

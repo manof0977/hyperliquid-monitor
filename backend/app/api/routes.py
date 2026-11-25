@@ -31,8 +31,9 @@ async def api_trigger_scan():
             eng.symbols_meta.keys(),
             key=lambda s: eng.tickers.get(s, {}).get("volume_24h", 0.0),
             reverse=True,
-        )[: settings.scan_limit]
-        asyncio.create_task(eng.scan_symbols(ranked))
+        )
+        target = ranked if settings.scan_limit <= 0 else ranked[: settings.scan_limit]
+        asyncio.create_task(eng.scan_symbols(target))
     return {"triggered": True, "scanning": eng.scanning, "direct_connected": eng.client.connected}
 
 
@@ -90,17 +91,27 @@ async def api_scanner(
 ):
     eng = get_engine()
     rows = list(eng.results.values())
-    # Also surface discovered contracts whose live tickers are known even before MTF scan completes
-    if not rows and eng.tickers:
-        for sym, tk in list(eng.tickers.items())[:200]:
-            if sym in eng.symbols_meta:
-                rows.append({
-                    "symbol": sym, "base_asset": eng.symbols_meta[sym]["baseAsset"],
-                    "price": tk["price"], "change_24h": tk["change_24h"], "volume_24h": tk["volume_24h"],
-                    "biases": {}, "long_tech_score": 0.0, "short_tech_score": 0.0,
-                    "long_opp_score": 0.0, "short_opp_score": 0.0,
-                    "status": "SCANNING", "early_watch": False, "early_reasons": [],
-                })
+    # Surface ALL discovered USDT perpetual contracts (including those still awaiting initial MTF scan)
+    if eng.symbols_meta:
+        for sym, meta in eng.symbols_meta.items():
+            if sym in eng.results:
+                continue
+            tk = eng.tickers.get(sym, {})
+            rows.append({
+                "symbol": sym,
+                "base_asset": meta.get("baseAsset", sym.replace("USDT", "")),
+                "price": tk.get("price", 0.0),
+                "change_24h": tk.get("change_24h", 0.0),
+                "volume_24h": tk.get("volume_24h", 0.0),
+                "biases": {},
+                "long_tech_score": 0.0,
+                "short_tech_score": 0.0,
+                "long_opp_score": 0.0,
+                "short_opp_score": 0.0,
+                "status": "SCANNING",
+                "early_watch": False,
+                "early_reasons": [],
+            })
     q = search.strip().upper()
     if q:
         rows = [r for r in rows if q in r["symbol"]]
@@ -112,11 +123,11 @@ async def api_scanner(
         rows = [r for r in rows if max(r.get("long_tech_score", 0), r.get("short_tech_score", 0)) >= min_score]
 
     key_map = {
-        "long_tech": lambda r: r.get("long_tech_score", 0),
-        "short_tech": lambda r: r.get("short_tech_score", 0),
-        "long_opp": lambda r: r.get("long_opp_score", 0),
-        "short_opp": lambda r: r.get("short_opp_score", 0),
-        "best_opp": lambda r: max(r.get("long_opp_score", 0), r.get("short_opp_score", 0)),
+        "long_tech": lambda r: (r.get("long_tech_score", 0), r.get("volume_24h", 0)),
+        "short_tech": lambda r: (r.get("short_tech_score", 0), r.get("volume_24h", 0)),
+        "long_opp": lambda r: (r.get("long_opp_score", 0), r.get("volume_24h", 0)),
+        "short_opp": lambda r: (r.get("short_opp_score", 0), r.get("volume_24h", 0)),
+        "best_opp": lambda r: (max(r.get("long_opp_score", 0), r.get("short_opp_score", 0)), r.get("volume_24h", 0)),
         "volume": lambda r: r.get("volume_24h", 0),
         "change": lambda r: r.get("change_24h", 0),
     }

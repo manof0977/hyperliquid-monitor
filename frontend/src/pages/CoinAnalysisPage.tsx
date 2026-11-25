@@ -3,6 +3,7 @@ import { apiGet, CoinPayload, fmtPrice } from '../api/client';
 import { binanceBridge } from '../api/binanceBridge';
 import { BiasPill, ScoreCell, StatusBadge } from '../components/Badges';
 import { SMCChart } from '../components/SMCChart';
+import { PlainEnglishReport } from '../components/PlainEnglishReport';
 
 const TFS = ['5m', '15m', '1h', '4h', '1d', '1w'];
 
@@ -100,17 +101,21 @@ export const CoinAnalysisPage: React.FC<Props> = ({
       </div>
 
       <div className="analysis-layout">
-        <div className="chart-panel panel">
-          {loading && !data ? (
-            <div className="empty">Loading {symbol} {tf} candles from Binance…</div>
-          ) : !data || data.candles.length === 0 ? (
-            <div className="empty">
-              No real historical candles stored yet for <strong>{symbol} ({tf})</strong>. Connect to Binance public
-              endpoint <code>fapi.binance.com</code> to populate live OHLCV data.
-            </div>
-          ) : (
-            <SMCChart data={data} showEMA={showEMA} showOB={showOB} showFVG={showFVG} showSR={showSR} showPlan={showPlan} />
-          )}
+        <div className="chart-col">
+          <div className="chart-panel panel">
+            {loading && !data ? (
+              <div className="empty">Loading {symbol} {tf} candles from Binance…</div>
+            ) : !data || data.candles.length === 0 ? (
+              <div className="empty">
+                No real historical candles stored yet for <strong>{symbol} ({tf})</strong>. Connect to Binance public
+                endpoint <code>fapi.binance.com</code> to populate live OHLCV data.
+              </div>
+            ) : (
+              <SMCChart data={data} showEMA={showEMA} showOB={showOB} showFVG={showFVG} showSR={showSR} showPlan={showPlan} />
+            )}
+          </div>
+
+          <PlainEnglishReport report={data?.explanation} symbol={symbol} tf={tf} />
         </div>
 
         <div className="side-analysis">

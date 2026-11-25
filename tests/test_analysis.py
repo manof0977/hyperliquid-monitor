@@ -91,3 +91,18 @@ def test_causal_backtester_runs_with_fees():
     assert "total_trades" in rep
     assert "profit_factor" in rep
     assert "max_drawdown_r" in rep
+
+
+def test_plain_english_report_generation():
+    from app.analysis.narrative import build_plain_english_report
+    df = _make_trend_df(160, 1)
+    tf_detail = analyze_timeframe(df, daily_df=df, weekly_df=df)
+    summary = analyze_symbol({tf: df for tf in ("5m", "15m", "1h", "4h", "1d", "1w")})
+    summary["price"] = float(df["close"].iloc[-1])
+    summary["change_24h"] = 2.35
+    rep = build_plain_english_report("BTCUSDT", "1h", tf_detail, summary)
+    assert rep is not None
+    assert rep["symbol"] == "BTCUSDT"
+    assert len(rep["sections"]) == 6
+    assert "BTCUSDT" in rep["headline"]
+

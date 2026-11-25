@@ -15,6 +15,7 @@ from app.db import (
     CANDLE_COLS, last_candle_time, load_candles_df, save_symbols, upsert_candles
 )
 from app.analysis.pipeline import analyze_symbol, analyze_timeframe
+from app.analysis.narrative import build_plain_english_report
 from app.alerts.telegram import maybe_emit_alert
 
 log = logging.getLogger("scanner")
@@ -39,6 +40,7 @@ class ScannerEngine:
         self.bridge_source: str | None = None
         self.bridge_last_ts: int | None = None
         self._on_demand_requests: list[dict] = []  # queued (symbol, tf) requests for browser bridge
+        self._last_tf_sync: dict[tuple[str, str], int] = {}
 
     async def start(self):
         self._stop.clear()
@@ -111,13 +113,13 @@ class ScannerEngine:
                     if sym in self.symbols_meta:
                         self.tickers[sym] = t
 
-                # Rank by 24h USDT quote volume so liquid contracts are scanned first
+                # Rank by 24h USDT quote volume so liquid contracts are scanned first; scan_limit <= 0 scans ALL coins
                 ranked = sorted(
                     self.symbols_meta.keys(),
                     key=lambda s: self.tickers.get(s, {}).get("volume_24h", 0.0),
                     reverse=True,
                 )
-                target_syms = ranked[: settings.scan_limit]
+                target_syms = ranked if settings.scan_limit <= 0 else ranked[: settings.scan_limit]
                 self._ensure_ws(target_syms)
                 await self.scan_symbols(target_syms)
             except asyncio.CancelledError:
@@ -198,14 +200,21 @@ class ScannerEngine:
 
     async def ensure_symbol_frames(self, symbol: str, sync_network: bool = True) -> dict[str, pd.DataFrame]:
         frames: dict[str, pd.DataFrame] = {}
+        now_ms = int(time.time() * 1000)
+        ttl_map = {"5m": 60_000, "15m": 120_000, "1h": 180_000, "4h": 300_000, "1d": 600_000, "1w": 900_000}
 
         async def _load_one(tf: str):
             key = (symbol, tf)
-            if sync_network:
+            target_bars = 99 if tf in ("1d", "1w") else settings.kline_limit
+            last_sync = self._last_tf_sync.get(key, 0)
+            if sync_network and (now_ms - last_sync) >= ttl_map.get(tf, 60_000):
                 last_t = await last_candle_time(symbol, tf)
-                rows = await self.client.sync_symbol_tf(symbol, tf, last_t, target_limit=settings.kline_limit)
+                rows = await self.client.sync_symbol_tf(symbol, tf, last_t, target_limit=target_bars)
                 await upsert_candles(symbol, tf, rows)
-            df = await load_candles_df(symbol, tf, limit=max(settings.kline_limit, 320))
+                self._last_tf_sync[key] = now_ms
+            df = self.candle_cache.get(key)
+            if df is None or df.empty or sync_network:
+                df = await load_candles_df(symbol, tf, limit=max(settings.kline_limit, 320))
             if not df.empty:
                 self.candle_cache[key] = df
                 frames[tf] = df
@@ -244,7 +253,7 @@ class ScannerEngine:
     async def scan_symbols(self, symbols: list[str]):
         self.scanning = True
         self.scan_progress = (0, len(symbols))
-        batch = 5
+        batch = 10
         done = 0
         try:
             for i in range(0, len(symbols), batch):
@@ -265,7 +274,7 @@ class ScannerEngine:
             log.debug("Symbol %s scan skipped: %s", symbol, exc)
 
     async def build_chart_payload(self, symbol: str, tf: str) -> dict:
-        """Full OHLCV + EMAs + structural overlays + active trade levels for Coin Analysis page."""
+        """Full OHLCV + EMAs + structural overlays + active trade levels + Plain-English report."""
         symbol = symbol.upper()
         if tf not in TIMEFRAMES:
             tf = "1h"
@@ -282,7 +291,15 @@ class ScannerEngine:
                 if df.empty:
                     self.queue_bridge_symbol(symbol)
         if df is None or df.empty:
-            return {"symbol": symbol, "tf": tf, "candles": [], "overlays": None, "summary": self.results.get(symbol)}
+            summary = self.results.get(symbol)
+            return {
+                "symbol": symbol,
+                "tf": tf,
+                "candles": [],
+                "overlays": None,
+                "summary": summary,
+                "explanation": build_plain_english_report(symbol, tf, None, summary),
+            }
 
         d_df = self.candle_cache.get((symbol, "1d")) or await load_candles_df(symbol, "1d", 60)
         w_df = self.candle_cache.get((symbol, "1w")) or await load_candles_df(symbol, "1w", 60)
@@ -318,12 +335,14 @@ class ScannerEngine:
                 "ind": tf_detail["ind"],
                 "div": tf_detail["div"],
             }
+        summary = self.results.get(symbol)
         return {
             "symbol": symbol,
             "tf": tf,
             "candles": candles,
             "overlays": overlays,
-            "summary": self.results.get(symbol),
+            "summary": summary,
+            "explanation": build_plain_english_report(symbol, tf, tf_detail, summary),
         }
 
     # ---------- Browser-Direct Real Binance Bridge Ingestion ----------
@@ -358,7 +377,7 @@ class ScannerEngine:
                         self.results[sym]["volume_24h"] = self.tickers[sym]["volume_24h"]
 
     async def get_bridge_sync_plan(self) -> dict:
-        """Return prioritized list of (symbol, tf, start_time, limit) jobs the backend still needs."""
+        """Return prioritized list of (symbol, tf, start_time, limit) jobs across ALL eligible contracts."""
         from app.config import TF_MS
         if self.client.connected:
             return {"needed": False, "jobs": [], "top_symbols": []}
@@ -366,47 +385,53 @@ class ScannerEngine:
             self.symbols_meta.keys(),
             key=lambda s: self.tickers.get(s, {}).get("volume_24h", 0.0),
             reverse=True,
-        )[: settings.scan_limit]
+        )
+        target_ranked = ranked if settings.scan_limit <= 0 else ranked[: settings.scan_limit]
 
-        # Prioritize explicit on-demand symbol views first
+        # 1. Explicit on-demand coin clicks first, 2. Un-scanned contracts next (so ALL coins finish first!), 3. Stale refreshes
         priority_syms: list[str] = []
         while self._on_demand_requests:
             req = self._on_demand_requests.pop(0)
             if req["symbol"] not in priority_syms:
                 priority_syms.append(req["symbol"])
 
-        ordered = priority_syms + [s for s in ranked if s not in priority_syms]
+        unscanned = [s for s in target_ranked if s not in self.results and s not in priority_syms]
+        scanned = [s for s in target_ranked if s in self.results and s not in priority_syms]
+        ordered = priority_syms + unscanned + scanned
+
         now_ms = int(time.time() * 1000)
+        ttl_map = {"5m": 180_000, "15m": 240_000, "1h": 360_000, "4h": 600_000, "1d": 900_000, "1w": 1_800_000}
         jobs: list[dict] = []
         for sym in ordered:
             missing_tfs: list[dict] = []
             for tf in TIMEFRAMES:
+                target_bars = 99 if tf in ("1d", "1w") else settings.kline_limit
                 df = self.candle_cache.get((sym, tf))
                 last_t = int(df.iloc[-1]["open_time"]) if (df is not None and not df.empty) else await last_candle_time(sym, tf)
                 if last_t is None:
-                    missing_tfs.append({"tf": tf, "limit": settings.kline_limit, "start_time": None})
+                    missing_tfs.append({"tf": tf, "limit": target_bars, "start_time": None})
                 else:
-                    step = TF_MS[tf]
-                    # Refresh if last bar is older than 1 interval (or 60s for 5m)
-                    stale_ms = min(step, 90_000)
-                    if (now_ms - last_t) >= stale_ms:
+                    last_sync = self._last_tf_sync.get((sym, tf), 0)
+                    if (now_ms - last_sync) >= ttl_map.get(tf, 180_000):
+                        step = TF_MS[tf]
                         gap = max(3, int((now_ms - last_t) // step) + 2)
                         missing_tfs.append({
                             "tf": tf,
-                            "limit": min(gap, settings.kline_limit),
-                            "start_time": last_t if gap < settings.kline_limit else None,
+                            "limit": min(gap, target_bars),
+                            "start_time": last_t if gap < target_bars else None,
                         })
             if missing_tfs:
                 jobs.append({"symbol": sym, "tfs": missing_tfs})
-            if len(jobs) >= 12:
+            if len(jobs) >= 18:
                 break
-        return {"needed": True, "jobs": jobs, "top_symbols": ranked[:40], "total_target": len(ordered)}
+        return {"needed": True, "jobs": jobs, "top_symbols": ranked[:40], "total_target": len(target_ranked)}
 
     async def ingest_bridge_klines(self, symbol: str, frames_raw: dict[str, list[list]], source: str = "fapi.binance.com") -> dict | None:
         symbol = symbol.upper()
+        now_ms = int(time.time() * 1000)
         self.bridge_active = True
         self.bridge_source = source
-        self.bridge_last_ts = int(time.time() * 1000)
+        self.bridge_last_ts = now_ms
         for tf, raw_rows in frames_raw.items():
             if tf not in TIMEFRAMES or not raw_rows:
                 continue
@@ -415,10 +440,11 @@ class ScannerEngine:
                 for k in raw_rows
             ]
             await upsert_candles(symbol, tf, rows)
+            self._last_tf_sync[(symbol, tf)] = now_ms
             df = await load_candles_df(symbol, tf, limit=max(settings.kline_limit, 320))
             if not df.empty:
                 self.candle_cache[(symbol, tf)] = df
-        self.last_scan_ts = int(time.time() * 1000)
+        self.last_scan_ts = now_ms
         return await self.analyze_one(symbol, sync_network=False)
 
     async def ingest_bridge_ws_batch(self, tickers: list[dict] | None, klines: list[dict] | None, ws_open: bool = True):

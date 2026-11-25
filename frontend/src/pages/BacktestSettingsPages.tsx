@@ -268,8 +268,8 @@ export const SettingsPage: React.FC = () => {
 
         <div className="panel form-stack">
           <h3>Engine & Optional Telegram Alerts</h3>
-          <label><span>Symbols per Full MTF Scan Cycle (sorted by 24H liquidity)</span>
-            <input className="input" type="number" min={10} max={300} value={cfg.scan_limit} onChange={(e) => setCfg({ ...cfg, scan_limit: Number(e.target.value) })} />
+          <label><span>Symbols per Full MTF Scan Cycle (0 = Scan ALL Binance USDT Perpetual Coins)</span>
+            <input className="input" type="number" min={0} max={1000} value={cfg.scan_limit} onChange={(e) => setCfg({ ...cfg, scan_limit: Number(e.target.value) })} />
           </label>
           <label><span>Scan Interval (seconds)</span>
             <input className="input" type="number" min={20} max={600} value={cfg.scan_interval_sec} onChange={(e) => setCfg({ ...cfg, scan_interval_sec: Number(e.target.value) })} />
