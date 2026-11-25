@@ -19,9 +19,9 @@ log = logging.getLogger("binance")
 
 
 class RateLimiter:
-    """Respects Binance 2400 weight/min budget; keeps safe ceiling of 1600/min."""
+    """Respects Binance 2400 weight/min budget; keeps safe ceiling of 2000/min."""
 
-    def __init__(self, max_per_min: int = 1600, concurrency: int = 8):
+    def __init__(self, max_per_min: int = 2000, concurrency: int = 12):
         self.max_per_min = max_per_min
         self.used_weight = 0
         self.window_reset = time.monotonic() + 60

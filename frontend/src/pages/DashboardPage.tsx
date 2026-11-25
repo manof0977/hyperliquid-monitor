@@ -27,8 +27,8 @@ export const DashboardPage: React.FC<Props> = ({ status, bridge, topRows, onSele
           {status?.scanning
             ? `Scanning (${status.scan_progress.done}/${status.scan_progress.total})…`
             : bridge?.currentSymbol
-            ? `Syncing ${bridge.currentSymbol} (${status?.total_scanned ?? 0}/${bridge.targetSymbols || 60})…`
-            : 'Rescan Market'}
+            ? `Syncing ${bridge.currentSymbol} (${status?.total_scanned ?? 0}/${bridge.targetSymbols || status?.eligible_contracts || 'ALL'})…`
+            : 'Rescan All Coins'}
         </button>
       </div>
 

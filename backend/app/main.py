@@ -22,6 +22,7 @@ engine = ScannerEngine()
 async def lifespan(app: FastAPI):
     await init_db()
     saved = await load_kv("settings")
+    migrated = await load_kv("all_coins_v2")
     if saved:
         th = saved.pop("thresholds", None)
         for k, v in saved.items():
@@ -31,6 +32,11 @@ async def lifespan(app: FastAPI):
             for k, v in th.items():
                 if hasattr(settings.thresholds, k):
                     setattr(settings.thresholds, k, int(v))
+    if not migrated:
+        if settings.scan_limit == 60:
+            settings.scan_limit = 0
+        from app.db import save_kv
+        await save_kv("all_coins_v2", {"done": True})
     await engine.start()
     yield
     await engine.stop()

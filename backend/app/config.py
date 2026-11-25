@@ -6,8 +6,8 @@ BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://fapi.binance.com")
 BINANCE_WS_URL = os.getenv("BINANCE_WS_URL", "wss://fstream.binance.com")
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "data", "scanner.db"))
 SCAN_INTERVAL_SEC = int(os.getenv("SCAN_INTERVAL_SEC", "60"))
-SCAN_LIMIT = int(os.getenv("SCAN_LIMIT", "60"))          # symbols getting full MTF analysis
-KLINE_LIMIT = int(os.getenv("KLINE_LIMIT", "300"))       # candles per TF per symbol
+SCAN_LIMIT = int(os.getenv("SCAN_LIMIT", "0"))           # 0 = scan ALL eligible USDT perpetual contracts
+KLINE_LIMIT = int(os.getenv("KLINE_LIMIT", "250"))       # candles per TF per symbol
 TICKER_POLL_SEC = int(os.getenv("TICKER_POLL_SEC", "5"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")

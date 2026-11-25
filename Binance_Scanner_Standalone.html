@@ -160,8 +160,14 @@
         </div>
       </div>
       <div class="analysis-grid">
-        <div class="panel" style="padding:8px">
-          <div id="chartStage"><canvas id="overlayCanvas"></canvas></div>
+        <div>
+          <div class="panel" style="padding:8px">
+            <div id="chartStage"><canvas id="overlayCanvas"></canvas></div>
+          </div>
+          <div class="panel" id="plainEnglishPanel">
+            <h3 style="margin:0 0 10px">Full Plain-English Technical Breakdown</h3>
+            <div id="plainEnglishBody" class="muted">Select a coin to read its full plain-English analysis…</div>
+          </div>
         </div>
         <div>
           <div class="panel"><h3 style="margin:0 0 10px">Timeframe Biases</h3><div id="coinBiases" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px"></div></div>
@@ -337,7 +343,7 @@ async function detectEndpoint(){
 async function scanAll(){
   if(state.scanning) return;
   state.scanning = true;
-  document.getElementById('rescanBtn').textContent = 'Scanning Live Binance…';
+  document.getElementById('rescanBtn').textContent = 'Scanning All Coins…';
   try{
     await detectEndpoint();
     document.getElementById('connStatus').innerHTML = `<span class="bull">● LIVE</span> ${EP.label}`;
@@ -351,31 +357,37 @@ async function scanAll(){
       if(valid.has(t.symbol)) state.tickers.set(t.symbol, { price:+t.lastPrice, chg:+t.priceChangePercent, vol:+t.quoteVolume });
     }
     document.getElementById('kElig').textContent = `${state.contracts.length} USDT pairs`;
-    const ranked = [...valid].sort((a,b)=>(state.tickers.get(b)?.vol||0)-(state.tickers.get(a)?.vol||0)).slice(0, 40);
+    const ranked = [...valid].sort((a,b)=>(state.tickers.get(b)?.vol||0)-(state.tickers.get(a)?.vol||0));
     populateSelect(ranked);
+    startWs();
+    renderAll();
 
-    let idx=0;
+    let idx=0, done=0;
     const workers = Array.from({length:4}, async ()=>{
       while(idx < ranked.length){
         const sym = ranked[idx++];
         const mtf = {};
         await Promise.all(['15m','1h','4h','1d'].map(async tf=>{
           try{
-            const kl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${tf}&limit=220`).then(r=>r.json());
+            const lim = tf==='1d' ? 99 : 220;
+            const kl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${tf}&limit=${lim}`).then(r=>r.json());
             mtf[tf] = analyzeCandles(kl);
           }catch{}
         }));
         const sc = scoreSymbol(sym, mtf);
-        if(sc){ state.results.set(sym, sc); renderAll(); }
+        done++;
+        document.getElementById('rescanBtn').textContent = `Scanning (${done}/${ranked.length})…`;
+        if(sc){ state.results.set(sym, sc); if(done <= 15 || done % 5 === 0) renderAll(); }
+        await new Promise(r=>setTimeout(r, 110));
       }
     });
     await Promise.all(workers);
-    startWs();
+    renderAll();
   }catch(e){
     document.getElementById('connStatus').innerHTML = `<span class="bear">● Offline</span> (${e.message})`;
   }finally{
     state.scanning = false;
-    document.getElementById('rescanBtn').textContent = 'Rescan Top Pairs';
+    document.getElementById('rescanBtn').textContent = 'Rescan All Coins';
   }
 }
 
@@ -425,12 +437,19 @@ function renderAll(){
       <div style="color:#fcd34d;font-size:12px;margin-top:4px">${r.earlyReasons.join(' • ')}</div>
     </div>`).join('') : 'No coins currently inside pre-breakout Early Watch zone.';
 
-  // Market Scanner
+  // Market Scanner (include ALL contracts — scanned + queued)
   const q = document.getElementById('qSearch').value.trim().toUpperCase();
   const sort = document.getElementById('qSort').value;
   const eo = document.getElementById('qEarly').checked;
-  let rows = arr.filter(r => (!q || r.symbol.includes(q)) && (!eo || r.early));
-  rows.sort((a,b)=> sort==='long_tech'?b.long_tech-a.long_tech : sort==='short_tech'?b.short_tech-a.short_tech : sort==='vol'?b.vol-a.vol : Math.max(b.long_opp,b.short_opp)-Math.max(a.long_opp,a.short_opp));
+  const fullList = [...arr];
+  for(const sym of state.contracts){
+    if(!state.results.has(sym)){
+      const tk = state.tickers.get(sym) || {price:0,chg:0,vol:0};
+      fullList.push({ symbol:sym, price:tk.price, chg:tk.chg, vol:tk.vol, biases:{}, long_tech:0, short_tech:0, long_opp:0, short_opp:0, status:'SCANNING', early:false });
+    }
+  }
+  let rows = fullList.filter(r => (!q || r.symbol.includes(q)) && (!eo || r.early));
+  rows.sort((a,b)=> sort==='long_tech'?(b.long_tech-a.long_tech || b.vol-a.vol) : sort==='short_tech'?(b.short_tech-a.short_tech || b.vol-a.vol) : sort==='vol'?b.vol-a.vol : (Math.max(b.long_opp,b.short_opp)-Math.max(a.long_opp,a.short_opp) || b.vol-a.vol));
   document.getElementById('scanBody').innerHTML = rows.map(r=>`
     <tr class="click" onclick="openCoin('${r.symbol}')">
       <td onclick="event.stopPropagation();toggleW('${r.symbol}')" style="color:${state.watch.has(r.symbol)?'var(--amber)':'var(--muted)'};font-size:15px">${state.watch.has(r.symbol)?'★':'☆'}</td>
@@ -468,7 +487,15 @@ async function loadCoinChart(){
   document.getElementById('coinSel').value = sym;
   const kl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${tf}&limit=260`).then(r=>r.json());
   const d = analyzeCandles(kl); if(!d) return;
-  const sum = state.results.get(sym);
+  let sum = state.results.get(sym);
+  if(!sum){
+    const mtfNow = {};
+    await Promise.all(['15m','1h','4h','1d'].map(async k=>{
+      try{ mtfNow[k] = analyzeCandles(await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${k}&limit=${k==='1d'?99:220}`).then(r=>r.json())); }catch{}
+    }));
+    sum = scoreSymbol(sym, mtfNow);
+    if(sum) state.results.set(sym, sum);
+  }
   document.getElementById('coinPrice').textContent = fmtP(d.cur);
   document.getElementById('coinStatus').innerHTML = sum ? badgeHtml(sum.status, sum.early) : '';
   document.getElementById('coinBiases').innerHTML = ['1d','4h','1h','15m'].map(k=>`<div style="background:var(--panel2);padding:7px;border-radius:6px;display:flex;justify-content:space-between"><span class="muted">${k.toUpperCase()}</span><span class="pill ${sum?.biases[k]||'NEUTRAL'}">${(sum?.biases[k]||'NEUT').slice(0,4)}</span></div>`).join('');
@@ -482,6 +509,40 @@ async function loadCoinChart(){
     <div class="kv"><span class="muted">Target 2</span><b class="mono bull">${fmtP(pl?.tgts?.[1])}</b></div>
     <div class="kv"><span class="muted">Risk / Reward</span><b class="mono">${pl?.rr?pl.rr+'R':'—'}</b></div>
     <div class="kv"><span class="muted">RSI(14) / Trend</span><b class="mono">${d.rsi[d.n-1].toFixed(1)} / ${d.trend.toUpperCase()}</b></div>`;
+
+  // Render Plain-English Breakdown below the chart
+  const tfUp = tf.toUpperCase(), stName = sum?.status || 'NO SETUP', sideName = sum?.side || 'LONG';
+  const lastBr = d.breaks[d.breaks.length-1], bullObs = d.obs.filter(o=>o.kind==='bullish'), bearObs = d.obs.filter(o=>o.kind==='bearish');
+  const rsiNow = d.rsi[d.n-1], bullTfs = Object.entries(sum?.biases||{}).filter(([,v])=>v==='BULLISH').map(([k])=>k.toUpperCase());
+  const bearTfs = Object.entries(sum?.biases||{}).filter(([,v])=>v==='BEARISH').map(([k])=>k.toUpperCase());
+  const verdict = stName.includes('CONFIRMED')
+    ? `<b>${sym}</b> has an active <b>${stName}</b> setup at <b>${fmtP(d.cur)}</b> — higher-timeframe structure, entry-zone proximity, lower-timeframe break confirmation, and Risk/Reward all align.`
+    : stName.includes('DEVELOPING')
+    ? `<b>${sym}</b> is in a <b>${stName}</b> phase at <b>${fmtP(d.cur)}</b> — chart structure leans ${sideName.toLowerCase()}, but wait for price to enter the Entry Zone and print a 15m/5m confirmation break before acting.`
+    : (stName.includes('WATCH') || sum?.early)
+    ? `<b>${sym}</b> is on <b>EARLY / ${stName}</b> at <b>${fmtP(d.cur)}</b> — approaching a key Order Block or volume expansion zone before a conventional breakout.`
+    : `<b>${sym}</b> currently shows <b>NO ACTIONABLE SETUP</b> at <b>${fmtP(d.cur)}</b> (Long Tech: ${sum?.long_tech??0}/100 vs Short Tech: ${sum?.short_tech??0}/100) — stand aside until price reaches a clean structural zone.`;
+  document.getElementById('plainEnglishBody').innerHTML = `
+    <div style="padding:11px 14px;border-radius:8px;background:rgba(56,189,248,.09);border-left:4px solid var(--accent);color:#f1f5f9;margin-bottom:12px;line-height:1.5">${verdict}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;color:#cbd5e1;line-height:1.55">
+      <div style="background:var(--panel2);padding:12px 14px;border-radius:8px;border:1px solid var(--border)">
+        <b class="accent">1. Multi-Timeframe Alignment</b>
+        <p style="margin:6px 0">Bullish TFs: <b>${bullTfs.join(', ')||'None'}</b> • Bearish TFs: <b>${bearTfs.join(', ')||'None'}</b>. Long Tech/Opp: <b>${sum?.long_tech??0} / ${sum?.long_opp??0}</b> | Short Tech/Opp: <b>${sum?.short_tech??0} / ${sum?.short_opp??0}</b>.</p>
+      </div>
+      <div style="background:var(--panel2);padding:12px 14px;border-radius:8px;border:1px solid var(--border)">
+        <b class="accent">2. ${tfUp} Market Structure (BOS & CHoCH)</b>
+        <p style="margin:6px 0">Confirmed 3-bar swing trend on ${tfUp} is <b>${d.trend.toUpperCase()}</b> (${d.swings.slice(-5).map(s=>s.lbl).join(' → ')||'forming'}). ${lastBr?`Latest break: <b>${lastBr.dir.toUpperCase()} ${lastBr.kind}</b> beyond <b>${fmtP(lastBr.lvl)}</b>.`:'No recent closed-candle break.'}</p>
+      </div>
+      <div style="background:var(--panel2);padding:12px 14px;border-radius:8px;border:1px solid var(--border)">
+        <b class="accent">3. ${tfUp} Smart Money Concepts (OB, FVG & Sweeps)</b>
+        <p style="margin:6px 0">Active Bullish Demand OBs: <b>${bullObs.length}</b> ${bullObs.length?`(nearest ${fmtP(bullObs[bullObs.length-1].bot)}–${fmtP(bullObs[bullObs.length-1].top)})`:''} • Bearish Supply OBs: <b>${bearObs.length}</b> ${bearObs.length?`(nearest ${fmtP(bearObs[bearObs.length-1].bot)}–${fmtP(bearObs[bearObs.length-1].top)})`:''} • Unfilled FVGs: <b>${d.fvgs.length}</b> • Liquidity Sweeps: <b>${d.sweeps.length}</b>.</p>
+      </div>
+      <div style="background:var(--panel2);padding:12px 14px;border-radius:8px;border:1px solid var(--border)">
+        <b class="accent">4. ${tfUp} EMAs, Momentum & Step-by-Step Trade Plan</b>
+        <p style="margin:6px 0">EMA Stack: <b>${d.bullStack?'BULLISH (20>50>100>200)':d.bearStack?'BEARISH (20<50<100<200)':'MIXED / CONSOLIDATING'}</b> • RSI(14): <b>${rsiNow.toFixed(1)}</b> • Vol: <b>${d.volRatio.toFixed(2)}x SMA20</b>.<br/>
+        ${pl?.ez ? `<b>${sideName} Blueprint:</b> Watch Entry Zone <b>${fmtP(pl.ez[0])} – ${fmtP(pl.ez[1])}</b> (Entry <b>${fmtP(pl.entry)}</b>), hard Invalidation at <b>${fmtP(pl.inv)}</b>, Targets <b>${(pl.tgts||[]).map(fmtP).join(' → ')||'—'}</b> (<b>${pl.rr}R</b>).` : 'No valid structural Entry Zone is near current price right now — wait for fresh displacement.'}</p>
+      </div>
+    </div>`;
 
   const stage = document.getElementById('chartStage');
   if(chartObj){ chartObj.remove(); chartObj = null; }

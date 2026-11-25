@@ -146,9 +146,27 @@ html, body, #root {
   .nav-list { flex-direction: row; overflow-x: auto; }
 }
 
+.chart-col { display: flex; flex-direction: column; min-width: 0; }
 .chart-panel { padding: 8px; }
 .chart-stage { position: relative; width: 100%; height: 520px; }
 .chart-overlay-canvas { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+
+.narrative-wrap { margin-top: 2px; }
+.narrative-headline {
+  padding: 12px 14px; border-radius: 8px; font-size: 14px; font-weight: 600; line-height: 1.5; margin-bottom: 14px;
+  background: rgba(148,163,184,0.09); border-left: 4px solid #64748b; color: #f1f5f9;
+}
+.narrative-headline.bullish { background: rgba(16,185,129,0.11); border-left-color: var(--bull); }
+.narrative-headline.bearish { background: rgba(239,68,68,0.11); border-left-color: var(--bear); }
+.narrative-headline.warning { background: rgba(245,158,11,0.11); border-left-color: var(--amber); }
+
+.narrative-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 12px; }
+.narrative-card {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 13px 15px;
+}
+.narrative-card h4 { margin: 0 0 8px; font-size: 13.5px; font-weight: 700; color: var(--accent); }
+.narrative-summary { margin: 0 0 9px; line-height: 1.55; color: #e2e8f0; font-size: 13px; }
+.narrative-bullets { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; color: #cbd5e1; line-height: 1.5; font-size: 12.5px; }
 
 .mtf-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .mtf-cell { background: var(--panel-2); padding: 8px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; }

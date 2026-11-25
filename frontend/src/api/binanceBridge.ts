@@ -323,14 +323,14 @@ class BrowserBinanceBridge {
           continue;
         }
 
-        // Process up to 3 symbols concurrently per batch (6 timeframes each = 18 light GETs, well inside Binance rate limits)
+        // Process up to 4 symbols concurrently per batch across ALL Binance USDT perpetual contracts (safe inside rate limits)
         const ep = this.spec;
-        const workerCount = 3;
+        const workerCount = 4;
         let idx = 0;
         const workers = Array.from({ length: Math.min(workerCount, plan.jobs.length) }, async () => {
           while (idx < plan.jobs.length && !this.stopped) {
             const job = plan.jobs[idx++];
-            this.emit({ currentSymbol: job.symbol, targetSymbols: plan.total_target ?? 60 });
+            this.emit({ currentSymbol: job.symbol, targetSymbols: plan.total_target ?? this.state.targetSymbols });
             const frames: Record<string, unknown[][]> = {};
             await Promise.all(
               job.tfs.map(async (q) => {
@@ -356,7 +356,7 @@ class BrowserBinanceBridge {
               });
               this.emit({ syncedSymbols: this.state.syncedSymbols + 1 });
             }
-            await new Promise((r) => setTimeout(r, 180));
+            await new Promise((r) => setTimeout(r, 120));
           }
         });
         await Promise.all(workers);
