@@ -64,8 +64,40 @@ def last_values(df: pd.DataFrame) -> dict:
         return {}
     r = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else r
+
+    def _wicks(row) -> tuple[float, float]:
+        hi, lo = float(row["high"]), float(row["low"])
+        op, cl = float(row["open"]), float(row["close"])
+        rng = max(hi - lo, 1e-12)
+        up_w = max(0.0, hi - max(op, cl)) / rng * 100.0
+        lo_w = max(0.0, min(op, cl) - lo) / rng * 100.0
+        return round(up_w, 1), round(lo_w, 1)
+
+    c_up_w, c_lo_w = _wicks(prev)
+    l_up_w, l_lo_w = _wicks(r)
+    atr_now = max(float(r["atr14"]) if pd.notna(r["atr14"]) else 0.0, 1e-12)
+    ema20_now = float(r["ema20"]) if pd.notna(r["ema20"]) else float(r["close"])
+    stretch_atr = (float(r["close"]) - ema20_now) / atr_now
+
+    # Consecutive closed directional bars ending at iloc[-2] (exhaustion run count)
+    consec_bull = 0
+    consec_bear = 0
+    closed_slice = df.iloc[:-1] if len(df) > 1 else df
+    for idx in range(len(closed_slice) - 1, max(-1, len(closed_slice) - 10), -1):
+        bar = closed_slice.iloc[idx]
+        if float(bar["close"]) > float(bar["open"]):
+            if consec_bear > 0:
+                break
+            consec_bull += 1
+        elif float(bar["close"]) < float(bar["open"]):
+            if consec_bull > 0:
+                break
+            consec_bear += 1
+        else:
+            break
+
     return {
-        "close": float(r["close"]), "ema20": float(r["ema20"]), "ema50": float(r["ema50"]),
+        "close": float(r["close"]), "ema20": ema20_now, "ema50": float(r["ema50"]),
         "ema100": float(r["ema100"]), "ema200": float(r["ema200"]), "rsi14": float(r["rsi14"]),
         "macd_hist": float(r["macd_hist"]), "atr14": float(r["atr14"]),
         "vol_ratio": float(r["vol_ratio"]) if pd.notna(r["vol_ratio"]) else 1.0,
@@ -74,6 +106,13 @@ def last_values(df: pd.DataFrame) -> dict:
         "ema_stack": str(r["ema_stack"]),
         "atr_prev": float(prev["atr14"]) if pd.notna(prev["atr14"]) else float(r["atr14"]),
         "vol_ratio_prev": float(prev["vol_ratio"]) if pd.notna(prev["vol_ratio"]) else 1.0,
+        "closed_upper_wick_pct": c_up_w,
+        "closed_lower_wick_pct": c_lo_w,
+        "live_upper_wick_pct": l_up_w,
+        "live_lower_wick_pct": l_lo_w,
+        "ema20_stretch_atr": round(stretch_atr, 2),
+        "consec_bull_bars": consec_bull,
+        "consec_bear_bars": consec_bear,
     }
 
 

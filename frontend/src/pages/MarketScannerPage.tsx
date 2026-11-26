@@ -1,12 +1,23 @@
 import React, { useEffect, useState } from 'react';
 import { apiGet, fmtPrice, fmtVol, ScanRow } from '../api/client';
-import { BiasPill, ScoreCell, StatusBadge } from '../components/Badges';
+import { BiasPill, ReactionBadge, ScoreCell, StatusBadge } from '../components/Badges';
 
 interface Props {
   onSelectCoin: (sym: string, side?: 'LONG' | 'SHORT') => void;
   watchlist: string[];
   onToggleWatch: (sym: string, add: boolean) => void;
 }
+
+const REACTIONS: { value: string; label: string }[] = [
+  { value: 'ALL', label: 'All Pre-Indicator States' },
+  { value: 'ACTIONABLE_NOW', label: 'Any Active Reaction (Bounce / Reversal / Pullback)' },
+  { value: 'BOUNCE_ZONE', label: 'Bounce Zones (Demand tap)' },
+  { value: 'PULLBACK_DUE', label: 'Pullback / Snapback Due (ATR stretch)' },
+  { value: 'REVERSAL_ANY', label: 'Reversal Zones (Liquidity sweep)' },
+  { value: 'BULLISH_REVERSAL_ZONE', label: 'Bottom Reversal Zones' },
+  { value: 'BEARISH_REVERSAL_ZONE', label: 'Top Reversal Zones' },
+  { value: 'MID_RANGE_WAIT', label: 'Mid-Range Wait (no edge)' },
+];
 
 const STATUSES = [
   'ALL',
@@ -24,6 +35,7 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
   const [rows, setRows] = useState<ScanRow[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [reactionFilter, setReactionFilter] = useState('ALL');
   const [sortBy, setSortBy] = useState('best_opp');
   const [minScore, setMinScore] = useState(0);
   const [earlyOnly, setEarlyOnly] = useState(false);
@@ -34,6 +46,7 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
       const q = new URLSearchParams({
         search,
         status: statusFilter,
+        reaction: reactionFilter,
         sort_by: sortBy,
         min_score: String(minScore),
         early_only: String(earlyOnly),
@@ -49,7 +62,7 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
     load();
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
-  }, [search, statusFilter, sortBy, minScore, earlyOnly]);
+  }, [search, statusFilter, reactionFilter, sortBy, minScore, earlyOnly]);
 
   return (
     <div className="page">
@@ -70,6 +83,11 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
         <select className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           {STATUSES.map((s) => (
             <option key={s} value={s}>{s === 'ALL' ? 'All Signal States' : s}</option>
+          ))}
+        </select>
+        <select className="input" value={reactionFilter} onChange={(e) => setReactionFilter(e.target.value)}>
+          {REACTIONS.map((r) => (
+            <option key={r.value} value={r.value}>{r.label}</option>
           ))}
         </select>
         <select className="input" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
@@ -111,12 +129,13 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
               <th className="clickable" onClick={() => setSortBy('long_opp')}>Long Opp ▾</th>
               <th className="clickable" onClick={() => setSortBy('short_opp')}>Short Opp ▾</th>
               <th>Signal Status</th>
+              <th>Pre-Indicator Reaction</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={16} className="empty">
+                <td colSpan={17} className="empty">
                   {loading ? 'Loading live contracts…' : 'No symbols match current filters (or awaiting Binance connection).'}
                 </td>
               </tr>
@@ -159,6 +178,13 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
                     <td><ScoreCell value={r.long_opp_score} side="long" /></td>
                     <td><ScoreCell value={r.short_opp_score} side="short" /></td>
                     <td><StatusBadge status={r.status} early={r.early_watch} /></td>
+                    <td>
+                      <ReactionBadge
+                        state={r.reaction_state}
+                        label={r.reaction_label}
+                        title={r.reaction_summary || 'Pre-indicator price-action reaction state'}
+                      />
+                    </td>
                   </tr>
                 );
               })

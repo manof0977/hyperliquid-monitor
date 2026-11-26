@@ -18,6 +18,7 @@ A high score NEVER auto-generates an entry signal — CONFIRMED requires explici
 BOS/CHoCH + price inside/rejecting a real structural zone + valid structural R:R.
 """
 from app.config import settings
+from app.analysis.reaction import classify_pre_indicator_reaction
 
 TF_WEIGHTS = {"1w": 3.0, "1d": 3.0, "4h": 2.5, "1h": 2.0, "15m": 1.5, "5m": 1.0}
 
@@ -445,6 +446,7 @@ def evaluate_symbol(mtf: dict[str, dict], prev_state: dict | None = None) -> dic
 def _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
           status, active_side, long_status, short_status, early_reasons, primary, primary_tf="1h") -> dict:
     active_plan = long_plan if active_side == "LONG" else short_plan
+    rx = classify_pre_indicator_reaction(primary, biases=biases, sentiment=None, tf_label=primary_tf.upper())
     return {
         "primary_tf": primary_tf,
         "biases": biases,
@@ -464,6 +466,10 @@ def _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_pla
         "status": status,
         "early_watch": bool(early_reasons),
         "early_reasons": early_reasons,
+        "reaction_state": rx["state"],
+        "reaction_label": rx["badge_label"],
+        "reaction_lean": rx["bias_lean"],
+        "reaction_summary": rx["summary"],
         "entry_zone": active_plan.get("entry_zone"),
         "entry": active_plan.get("entry"),
         "invalidation": active_plan.get("invalidation"),

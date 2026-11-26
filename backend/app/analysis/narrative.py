@@ -6,6 +6,9 @@ into a clear, step-by-step plain-English report for traders — zero fabricated 
 """
 
 
+from app.analysis.reaction import classify_pre_indicator_reaction
+
+
 def _fp(val: float | None) -> str:
     if val is None:
         return "—"
@@ -605,6 +608,12 @@ def build_plain_english_report(
         summary=summary,
         sentiment=sentiment,
     )
+    pre_indicator_radar = classify_pre_indicator_reaction(
+        tf_detail=tf_detail,
+        biases=biases,
+        sentiment=sentiment,
+        tf_label=tf_up,
+    )
 
     return {
         "symbol": symbol,
@@ -612,5 +621,6 @@ def build_plain_english_report(
         "tone": tone,
         "headline": headline,
         "next_move_map": next_move_map,
+        "pre_indicator_radar": pre_indicator_radar,
         "sections": sections,
     }

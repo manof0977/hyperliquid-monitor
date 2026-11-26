@@ -1,5 +1,6 @@
 import React from 'react';
-import { ExplanationReport, fmtVol } from '../api/client';
+import { ExplanationReport, fmtPrice, fmtVol } from '../api/client';
+import { ReactionBadge } from './Badges';
 
 interface Props {
   report: ExplanationReport | null | undefined;
@@ -43,6 +44,7 @@ export const PlainEnglishReport: React.FC<Props> = ({ report, symbol, tf }) => {
 
   const nm = report.next_move_map;
   const pm = nm?.positioning_metrics;
+  const rx = report.pre_indicator_radar;
 
   return (
     <div className="panel narrative-wrap">
@@ -54,6 +56,80 @@ export const PlainEnglishReport: React.FC<Props> = ({ report, symbol, tf }) => {
       <div className={`narrative-headline ${report.tone}`}>
         {report.headline}
       </div>
+
+      {rx && (
+        <div className="rx-radar-box">
+          <div className="rx-radar-head">
+            <div>
+              <div className="scenario-kicker">PRE-INDICATOR PRICE-ACTION REACTION RADAR</div>
+              <div className="scenario-lean">
+                State: <ReactionBadge state={rx.state} label={rx.badge_label} />{' '}
+                <span className="muted small">
+                  Range position {rx.range_position_pct.toFixed(0)}% • EMA20 stretch {rx.ema20_stretch_atr >= 0 ? '+' : ''}
+                  {rx.ema20_stretch_atr.toFixed(2)} ATR
+                </span>
+              </div>
+            </div>
+            <span className="muted small">Fires BEFORE EMA/MACD/RSI flip — measured on closed candles only</span>
+          </div>
+
+          <p className="narrative-summary" style={{ marginBottom: 8 }}>{rx.summary}</p>
+
+          <div className="rx-zones-grid">
+            <div className="rx-zone-card bounce">
+              <div className="scenario-title">Demand / Bounce Wall Below</div>
+              {rx.bounce_zone ? (
+                <>
+                  <p>
+                    <strong>{rx.bounce_zone.label}</strong> · {fmtPrice(rx.bounce_zone.low)} – {fmtPrice(rx.bounce_zone.high)}
+                    {' '}({rx.bounce_zone.distance_atr.toFixed(2)} ATR){rx.bounce_zone.in_zone ? ' — PRICE IS IN ZONE' : ''}
+                  </p>
+                  <p className="muted small">
+                    Hard invalidation: {fmtPrice(rx.bounce_zone.invalidation)} (0.25 ATR under zone) • Reaction target:{' '}
+                    {fmtPrice(rx.bounce_zone.target_1)}
+                  </p>
+                </>
+              ) : (
+                <p className="muted small">No clean demand wall within 6 ATR below price.</p>
+              )}
+            </div>
+            <div className="rx-zone-card reject">
+              <div className="scenario-title">Supply / Rejection Wall Above</div>
+              {rx.rejection_zone ? (
+                <>
+                  <p>
+                    <strong>{rx.rejection_zone.label}</strong> · {fmtPrice(rx.rejection_zone.low)} – {fmtPrice(rx.rejection_zone.high)}
+                    {' '}({rx.rejection_zone.distance_atr.toFixed(2)} ATR){rx.rejection_zone.in_zone ? ' — PRICE IS IN ZONE' : ''}
+                  </p>
+                  <p className="muted small">
+                    Hard invalidation: {fmtPrice(rx.rejection_zone.invalidation)} (0.25 ATR above zone) • Reaction target:{' '}
+                    {fmtPrice(rx.rejection_zone.target_1)}
+                  </p>
+                </>
+              ) : (
+                <p className="muted small">No clean supply wall within 6 ATR above price.</p>
+              )}
+            </div>
+          </div>
+
+          {rx.why_before_indicators.length > 0 && (
+            <ul className="narrative-bullets">
+              {rx.why_before_indicators.map((b, i) => (
+                <li key={i}>{b}</li>
+              ))}
+            </ul>
+          )}
+
+          <div className="rx-exec-strip">
+            <span>{rx.aggressive_trigger}</span>
+            <span>{rx.conservative_trigger}</span>
+            <span className="muted small">
+              This radar is NOT a trade signal — it never upgrades a setup to CONFIRMED. Candle-close confirmation,
+              structure breaks, and your existing risk rules still gate every entry.
+            </span>
+          </div>
+        </div>
+      )}
 
       {nm && (
         <div className="scenario-map-box">
