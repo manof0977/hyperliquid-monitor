@@ -40,19 +40,27 @@ export const App: React.FC = () => {
   const [bridge, setBridge] = useState<BridgeState | null>(null);
 
   useEffect(() => {
+    const refreshSymbols = () => {
+      apiGet<{ symbols: string[] }>('/api/symbols')
+        .then((r) => {
+          if (r.symbols && r.symbols.length > 0) {
+            setSymbols(r.symbols);
+          }
+        })
+        .catch(() => {});
+    };
+
     binanceBridge.start();
     const unsub = binanceBridge.subscribe((st) => {
       setBridge(st);
-      if (st.syncedSymbols > 0 && (st.syncedSymbols === 1 || st.syncedSymbols % 8 === 0)) {
-        apiGet<{ symbols: string[] }>('/api/symbols')
-          .then((r) => r.symbols.length && setSymbols(r.symbols))
-          .catch(() => {});
+      if (st.targetSymbols > 0 || (st.syncedSymbols > 0 && (st.syncedSymbols <= 3 || st.syncedSymbols % 8 === 0))) {
+        refreshSymbols();
       }
     });
 
-    apiGet<{ symbols: string[] }>('/api/symbols')
-      .then((r) => r.symbols.length && setSymbols(r.symbols))
-      .catch(() => {});
+    refreshSymbols();
+    const symPoll = window.setInterval(refreshSymbols, 6000);
+
     apiGet<{ symbols: string[] }>('/api/watchlist')
       .then((r) => setWatchlist(r.symbols))
       .catch(() => {});
@@ -83,13 +91,17 @@ export const App: React.FC = () => {
     connect();
     return () => {
       unsub();
+      clearInterval(symPoll);
       if (retryTimer) clearTimeout(retryTimer);
       ws?.close();
     };
   }, []);
 
   const openCoin = (sym: string, side?: 'LONG' | 'SHORT') => {
-    setSelectedCoin(sym);
+    const clean = sym.trim().toUpperCase();
+    if (!clean) return;
+    setSymbols((prev) => (prev.includes(clean) ? prev : [...prev, clean].sort()));
+    setSelectedCoin(clean);
     setPreferredSide(side ?? null);
     setTab('analysis');
   };

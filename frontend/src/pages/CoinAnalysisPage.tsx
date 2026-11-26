@@ -41,10 +41,13 @@ export const CoinAnalysisPage: React.FC<Props> = ({
   const [showPlan, setShowPlan] = useState(true);
   const [manualSide, setManualSide] = useState<'LONG' | 'SHORT' | null>(preferredSide ?? null);
   const [showRulesHelp, setShowRulesHelp] = useState(false);
+  const [coinQuery, setCoinQuery] = useState('');
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // Sync manualSide & clear stale coin chart whenever symbol changes
   useEffect(() => {
     setManualSide(preferredSide ?? null);
+    setCoinQuery('');
     setData((prev) => (prev && prev.symbol === symbol ? prev : null));
     setMultiData({});
   }, [symbol, preferredSide]);
@@ -68,18 +71,29 @@ export const CoinAnalysisPage: React.FC<Props> = ({
       try {
         let first = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
         if (alive && first.candles.length === 0) {
-          const ok = await binanceBridge.syncSingleSymbolNow(symbol);
-          if (ok && alive) {
-            first = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
-          }
-        } else if (alive && !first.sentiment) {
-          const ok = await binanceBridge.syncSymbolSentiment(symbol, tf);
+          const ok = await binanceBridge.syncSingleSymbolNow(symbol, tf);
           if (ok && alive) {
             first = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
           }
         }
         if (!alive) return;
+        // Render candles immediately without waiting for background sentiment calls
         setData(first);
+        setLoading(false);
+
+        if (alive && first.candles.length > 0 && !first.sentiment) {
+          binanceBridge
+            .syncSymbolSentiment(symbol, tf)
+            .then(async (ok) => {
+              if (ok && alive) {
+                const refreshed = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
+                if (alive && refreshed.symbol === symbol) {
+                  setData(refreshed);
+                }
+              }
+            })
+            .catch(() => {});
+        }
 
         const extraTfs = neededTfs.filter((k) => k !== tf);
         if (extraTfs.length > 0) {
@@ -94,7 +108,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
           );
           // If any secondary timeframe had 0 candles, sync all 6 TFs once and re-read
           if (alive && results.some((it) => it && it[1].candles.length === 0)) {
-            const ok = await binanceBridge.syncSingleSymbolNow(symbol);
+            const ok = await binanceBridge.syncSingleSymbolNow(symbol, tf);
             if (ok && alive) {
               results = await Promise.all(
                 extraTfs.map(async (k) => {
@@ -129,7 +143,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
       alive = false;
       clearInterval(id);
     };
-  }, [symbol, tf, layout, splitLeft, splitRight]);
+  }, [symbol, tf, layout, splitLeft, splitRight, reloadNonce]);
 
   const sum = data?.summary;
   const ov = data?.overlays;
@@ -158,15 +172,91 @@ export const CoinAnalysisPage: React.FC<Props> = ({
       ? sum?.short_status || (sum?.status?.startsWith('SHORT') ? sum.status : 'NO SETUP')
       : sum?.long_status || (sum?.status?.startsWith('LONG') ? sum.status : 'NO SETUP');
 
+  const orderedSymbols = React.useMemo(() => {
+    const base = symbols.includes(symbol) ? symbols : [...symbols, symbol];
+    return [...base].sort();
+  }, [symbols, symbol]);
+
+  const curSymIdx = Math.max(0, orderedSymbols.indexOf(symbol));
+  const jumpByOffset = (delta: number) => {
+    if (orderedSymbols.length <= 1) return;
+    const nextIdx = (curSymIdx + delta + orderedSymbols.length) % orderedSymbols.length;
+    onChangeSymbol(orderedSymbols[nextIdx]);
+  };
+
+  const handleQuickJump = (raw: string) => {
+    const q = raw.trim().toUpperCase();
+    if (!q) return;
+    const exact = orderedSymbols.find((s) => s === q) || orderedSymbols.find((s) => s === `${q}USDT`);
+    if (exact) {
+      onChangeSymbol(exact);
+      setCoinQuery('');
+      return;
+    }
+    const partial = orderedSymbols.find((s) => s.startsWith(q)) || orderedSymbols.find((s) => s.includes(q));
+    if (partial) {
+      onChangeSymbol(partial);
+      setCoinQuery('');
+      return;
+    }
+    onChangeSymbol(q.endsWith('USDT') ? q : `${q}USDT`);
+    setCoinQuery('');
+  };
+
   return (
     <div className="page">
       <div className="page-header">
-        <div className="coin-title-row">
+        <div className="coin-title-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <button
+            className="btn ghost"
+            style={{ padding: '5px 9px' }}
+            title="Previous Coin"
+            onClick={() => jumpByOffset(-1)}
+          >
+            ◀
+          </button>
           <select className="input sym-select" value={symbol} onChange={(e) => onChangeSymbol(e.target.value)}>
-            {[symbol, ...symbols.filter((s) => s !== symbol)].map((s) => (
+            {orderedSymbols.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
+          <button
+            className="btn ghost"
+            style={{ padding: '5px 9px' }}
+            title="Next Coin"
+            onClick={() => jumpByOffset(1)}
+          >
+            ▶
+          </button>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleQuickJump(coinQuery);
+            }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          >
+            <input
+              className="input"
+              list="coin-jump-list"
+              placeholder="Jump coin (e.g. ETH, SOL)…"
+              value={coinQuery}
+              style={{ width: 175 }}
+              onChange={(e) => {
+                const v = e.target.value;
+                setCoinQuery(v);
+                const up = v.trim().toUpperCase();
+                if (orderedSymbols.includes(up)) {
+                  onChangeSymbol(up);
+                  setCoinQuery('');
+                }
+              }}
+            />
+            <datalist id="coin-jump-list">
+              {orderedSymbols.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
+          </form>
           <span className="coin-price mono">{fmtPrice(sum?.price ?? data?.candles.slice(-1)[0]?.close)}</span>
           {sum && (
             <span className={sum.change_24h >= 0 ? 'bull-txt mono' : 'bear-txt mono'}>
@@ -259,7 +349,16 @@ export const CoinAnalysisPage: React.FC<Props> = ({
                 />
               ) : (
                 <div className="empty" style={{ height: 500, display: 'grid', placeItems: 'center' }}>
-                  {loading ? `Loading ${symbol} ${tf.toUpperCase()} klines…` : 'No candle data available yet (check Binance connection).'}
+                  {loading ? (
+                    `Loading ${symbol} ${tf.toUpperCase()} klines…`
+                  ) : (
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ marginBottom: 10 }}>No candle data available yet for {symbol} ({tf.toUpperCase()}).</div>
+                      <button className="btn" onClick={() => setReloadNonce((n) => n + 1)}>
+                        Retry Loading {symbol} Chart
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -307,8 +406,9 @@ export const CoinAnalysisPage: React.FC<Props> = ({
                         </button>
                       </div>
                     </div>
-                    {pData && pData.candles.length > 0 ? (
+                    {pData && pData.symbol === symbol && pData.candles.length > 0 ? (
                       <SMCChart
+                        key={`${symbol}-2x-${idx}-${paneTf}`}
                         data={pData}
                         showEMA={showEMA}
                         showOB={showOB}
@@ -321,7 +421,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
                       />
                     ) : (
                       <div className="empty" style={{ height: 390, display: 'grid', placeItems: 'center' }}>
-                        Loading {paneTf.toUpperCase()}…
+                        Loading {symbol} {paneTf.toUpperCase()}…
                       </div>
                     )}
                   </div>
@@ -362,8 +462,9 @@ export const CoinAnalysisPage: React.FC<Props> = ({
                         ) : null}
                       </div>
                     </div>
-                    {pData && pData.candles.length > 0 ? (
+                    {pData && pData.symbol === symbol && pData.candles.length > 0 ? (
                       <SMCChart
+                        key={`${symbol}-4x-${paneTf}`}
                         data={pData}
                         showEMA={showEMA}
                         showOB={showOB}

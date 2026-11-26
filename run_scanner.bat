@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 if "%~1"=="--open-browser" (
-    call :OPEN_APP "http://127.0.0.1:8000"
+    call :OPEN_APP "http://127.0.0.1:8000/?v=3"
     exit /b 0
 )
 
@@ -47,6 +47,11 @@ if errorlevel 1 (
 )
 
 if not exist "data" mkdir data
+
+:: Free port 8000 if a previous scanner instance was left running in the background
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do (
+    if not "%%p"=="0" taskkill /F /PID %%p >nul 2>nul
+)
 
 :: 3. Launch browser window automatically once port 8000 is ready
 set "APP_URL=http://127.0.0.1:8000"

@@ -46,12 +46,29 @@ export const SMCChart: React.FC<Props> = ({
     const el = wrapRef.current;
     if (!el) return;
 
+    // Guarantee strictly ascending, unique-timestamp finite candles so Lightweight Charts never throws
+    const byTs = new Map<number, CoinPayload['candles'][number]>();
+    for (const c of data.candles) {
+      if (
+        typeof c.time === 'number' &&
+        Number.isFinite(c.time) &&
+        Number.isFinite(c.open) &&
+        Number.isFinite(c.high) &&
+        Number.isFinite(c.low) &&
+        Number.isFinite(c.close)
+      ) {
+        byTs.set(Math.floor(c.time), c);
+      }
+    }
+    const cleanCandles = Array.from(byTs.values()).sort((a, b) => a.time - b.time);
+    if (cleanCandles.length === 0) return;
+
     const isClean = detailMode === 'clean' || compact;
-    const lastClose = data.candles.length ? data.candles[data.candles.length - 1].close : data.summary?.price;
+    const lastClose = cleanCandles[cleanCandles.length - 1].close ?? data.summary?.price;
     const pf = resolvePriceFormat(lastClose, data.tick_size, data.price_precision);
 
     const chart = createChart(el, {
-      width: el.clientWidth,
+      width: Math.max(el.clientWidth || 0, 300),
       height,
       layout: {
         background: { type: ColorType.Solid, color: '#0b0f17' },
@@ -91,8 +108,8 @@ export const SMCChart: React.FC<Props> = ({
     });
     seriesRef.current = candleSeries;
 
-    const candles = data.candles.map((c) => ({
-      time: c.time as UTCTimestamp,
+    const candles = cleanCandles.map((c) => ({
+      time: Math.floor(c.time) as UTCTimestamp,
       open: c.open,
       high: c.high,
       low: c.low,
@@ -116,9 +133,9 @@ export const SMCChart: React.FC<Props> = ({
     });
     volSeries.priceScale().applyOptions({ scaleMargins: { top: 0.86, bottom: 0 } });
     volSeries.setData(
-      data.candles.map((c) => ({
-        time: c.time as UTCTimestamp,
-        value: c.volume,
+      cleanCandles.map((c) => ({
+        time: Math.floor(c.time) as UTCTimestamp,
+        value: Number.isFinite(c.volume) ? c.volume : 0,
         color: c.close >= c.open ? 'rgba(16,185,129,0.22)' : 'rgba(239,68,68,0.22)',
       }))
     );
@@ -146,9 +163,9 @@ export const SMCChart: React.FC<Props> = ({
           priceFormat: { type: 'price', precision: pf.precision, minMove: pf.minMove },
         });
         ls.setData(
-          data.candles
-            .filter((c) => typeof c[key] === 'number')
-            .map((c) => ({ time: c.time as UTCTimestamp, value: c[key] as number }))
+          cleanCandles
+            .filter((c) => typeof c[key] === 'number' && Number.isFinite(c[key] as number))
+            .map((c) => ({ time: Math.floor(c.time) as UTCTimestamp, value: c[key] as number }))
         );
       }
     }

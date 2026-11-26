@@ -19,28 +19,31 @@ log = logging.getLogger("binance")
 
 
 class RateLimiter:
-    """Respects Binance 2400 weight/min budget; keeps safe ceiling of 2000/min."""
+    """Respects Binance 2400 weight/min budget; reserves headroom so priority chart clicks never block."""
 
-    def __init__(self, max_per_min: int = 2000, concurrency: int = 12):
+    def __init__(self, max_per_min: int = 2150, bg_per_min: int = 1550, concurrency: int = 10):
         self.max_per_min = max_per_min
+        self.bg_per_min = bg_per_min
         self.used_weight = 0
         self.window_reset = time.monotonic() + 60
         self.sem = asyncio.Semaphore(concurrency)
         self._lock = asyncio.Lock()
 
-    async def acquire(self, weight: int = 2):
-        async with self._lock:
-            now = time.monotonic()
-            if now >= self.window_reset:
-                self.used_weight = 0
-                self.window_reset = now + 60
-            if self.used_weight + weight > self.max_per_min:
-                sleep_for = max(0.5, self.window_reset - now)
-                log.warning("Rate-limit budget near ceiling (%s), sleeping %.1fs", self.used_weight, sleep_for)
-                await asyncio.sleep(sleep_for)
-                self.used_weight = 0
-                self.window_reset = time.monotonic() + 60
-            self.used_weight += weight
+    async def acquire(self, weight: int = 2, priority: bool = False):
+        while True:
+            sleep_for = 0.0
+            async with self._lock:
+                now = time.monotonic()
+                if now >= self.window_reset:
+                    self.used_weight = 0
+                    self.window_reset = now + 60
+                ceiling = self.max_per_min if priority else self.bg_per_min
+                if self.used_weight + weight <= ceiling:
+                    self.used_weight += weight
+                    return
+                sleep_for = max(0.4, min(self.window_reset - now, 4.0 if priority else 12.0))
+            log.debug("Rate-limit pacing (priority=%s, weight=%s), sleeping %.1fs", priority, self.used_weight, sleep_for)
+            await asyncio.sleep(sleep_for)
 
     def observe_headers(self, headers):
         w = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
@@ -69,34 +72,62 @@ class BinanceFuturesClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def _get(self, path: str, params: dict | None = None, weight: int = 2):
-        await self.limiter.acquire(weight)
+    async def _get(self, path: str, params: dict | None = None, weight: int = 2, priority: bool = False):
+        await self.limiter.acquire(weight, priority=priority)
         url = f"{self.base_url}{path}"
-        backoff = 1.0
+        backoff = 0.8
         for attempt in range(3):
             try:
-                async with self.limiter.sem:
-                    sess = await self.session()
+                sess = await self.session()
+                if priority:
                     async with sess.get(url, params=params) as resp:
                         self.limiter.observe_headers(resp.headers)
                         if resp.status in (429, 418):
-                            retry_after = float(resp.headers.get("Retry-After", backoff * 4))
-                            log.warning("HTTP %s from Binance, backing off %.1fs", resp.status, retry_after)
+                            retry_after = min(float(resp.headers.get("Retry-After", backoff * 2)), 4.0)
                             await asyncio.sleep(retry_after)
                             continue
+                        if resp.status == 451:
+                            self.connected = False
                         resp.raise_for_status()
                         data = await resp.json()
                         self.connected = True
                         self.last_error = None
                         self.last_ok_ts = int(time.time() * 1000)
                         return data
+                else:
+                    async with self.limiter.sem:
+                        async with sess.get(url, params=params) as resp:
+                            self.limiter.observe_headers(resp.headers)
+                            if resp.status in (429, 418):
+                                retry_after = min(float(resp.headers.get("Retry-After", backoff * 4)), 15.0)
+                                log.warning("HTTP %s from Binance, backing off %.1fs", resp.status, retry_after)
+                                await asyncio.sleep(retry_after)
+                                continue
+                            if resp.status == 451:
+                                self.connected = False
+                            resp.raise_for_status()
+                            data = await resp.json()
+                            self.connected = True
+                            self.last_error = None
+                            self.last_ok_ts = int(time.time() * 1000)
+                            return data
+            except aiohttp.ClientResponseError as exc:
+                self.last_error = f"HTTP {exc.status}: {exc.message}"
+                # 400 Invalid symbol / missing ratio history must NOT mark the whole Binance client disconnected
+                if 400 <= exc.status < 500 and exc.status not in (429, 418):
+                    raise
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(backoff)
+                backoff *= 1.8
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 if attempt == 2:
-                    self.connected = False
+                    if self.last_ok_ts is None or (int(time.time() * 1000) - self.last_ok_ts) > 90_000:
+                        self.connected = False
                     raise
                 await asyncio.sleep(backoff)
-                backoff *= 2
+                backoff *= 1.8
 
     async def discover_usdt_perpetuals(self) -> list[dict]:
         """Auto-discover contracts: quoteAsset=USDT, contractType=PERPETUAL, status=TRADING."""
@@ -206,13 +237,22 @@ class BinanceFuturesClient:
         return out
 
     async def fetch_klines(
-        self, symbol: str, interval: str, limit: int = 300, start_time: int | None = None
+        self, symbol: str, interval: str, limit: int = 300, start_time: int | None = None, priority: bool = False
     ) -> list[tuple]:
         params: dict = {"symbol": symbol, "interval": interval, "limit": min(limit, 1500)}
         if start_time is not None:
             params["startTime"] = start_time
         w = 1 if limit < 100 else (2 if limit < 500 else 5)
-        raw = await self._get("/fapi/v1/klines", params=params, weight=w)
+        try:
+            raw = await self._get("/fapi/v1/klines", params=params, weight=w, priority=priority)
+        except Exception:
+            if not priority:
+                raise
+            # Priority fallback to Binance Market-Data Vision mirror (separate rate-limit pool)
+            sess = await self.session()
+            async with sess.get("https://data-api.binance.vision/api/v3/klines", params=params) as resp:
+                resp.raise_for_status()
+                raw = await resp.json()
         return [
             (int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5]), int(k[6]))
             for k in raw
