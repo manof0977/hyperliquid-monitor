@@ -156,3 +156,33 @@ def test_short_and_long_plan_directional_consistency():
         assert bull_res["entry"] == lp["entry"]
         assert bull_res["invalidation"] < bull_res["entry"]
 
+
+def test_build_chart_payload_switches_coins_and_timeframes():
+    import asyncio
+    from app.scanner.engine import ScannerEngine
+
+    eng = ScannerEngine()
+    eng.symbols_meta = {
+        "MEGAUSDT": {"symbol": "MEGAUSDT", "baseAsset": "MEGA", "tickSize": 0.00001, "pricePrecision": 5},
+        "BTCUSDT": {"symbol": "BTCUSDT", "baseAsset": "BTC", "tickSize": 0.1, "pricePrecision": 2},
+    }
+    mega_df = _make_trend_df(140, -1)
+    btc_df = _make_trend_df(140, 1)
+    for tf in ("5m", "15m", "1h", "4h", "1d", "1w"):
+        eng.candle_cache[("MEGAUSDT", tf)] = mega_df
+        eng.candle_cache[("BTCUSDT", tf)] = btc_df
+
+    async def _run():
+        p_mega_1h = await eng.build_chart_payload("MEGAUSDT", "1h")
+        p_mega_15m = await eng.build_chart_payload("MEGAUSDT", "15m")
+        p_btc_4h = await eng.build_chart_payload("BTCUSDT", "4h")
+        assert p_mega_1h["symbol"] == "MEGAUSDT" and p_mega_1h["tf"] == "1h"
+        assert p_mega_1h["tick_size"] == 0.00001 and p_mega_1h["price_precision"] == 5
+        assert len(p_mega_1h["candles"]) == 140
+        assert p_mega_15m["symbol"] == "MEGAUSDT" and p_mega_15m["tf"] == "15m"
+        assert len(p_mega_15m["candles"]) == 140
+        assert p_btc_4h["symbol"] == "BTCUSDT" and p_btc_4h["tf"] == "4h"
+        assert len(p_btc_4h["candles"]) == 140
+
+    asyncio.run(_run())
+

@@ -203,7 +203,23 @@ const state = {
   selectedCoin: 'BTCUSDT', selectedTf: '1h', scanning: false
 };
 
-const fmtP = p => p==null||isNaN(p)?'—':Math.abs(p)>=1000?p.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):Math.abs(p)>=1?p.toFixed(4):p.toPrecision(4);
+const fmtP = p => {
+  if(p==null||isNaN(p)) return '—';
+  const a=Math.abs(p);
+  if(a===0) return '0.00';
+  if(a>=1000) return p.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  if(a>=10) return p.toFixed(3);
+  if(a>=1) return p.toFixed(4);
+  if(a>=0.1) return p.toFixed(5);
+  if(a>=0.01) return p.toFixed(6);
+  if(a>=0.001) return p.toFixed(7);
+  return p.toFixed(8);
+};
+const chartPriceFmt = p => {
+  const a=Math.abs(p||0);
+  const dec = a>=1000?2 : a>=10?3 : a>=1?4 : a>=0.1?5 : a>=0.01?6 : a>=0.001?7 : 8;
+  return { type:'price', precision:dec, minMove:+(10**-dec).toFixed(dec) };
+};
 const fmtV = v => !v?'$0':v>=1e9?`$${(v/1e9).toFixed(2)}B`:v>=1e6?`$${(v/1e6).toFixed(1)}M`:`$${(v/1e3).toFixed(0)}K`;
 const badgeHtml = (st, early) => {
   const cls = st.includes('CONFIRMED')?(st.startsWith('LONG')?'b-lconf':'b-sconf'):(st.includes('DEVELOPING')||st.includes('WATCH'))?'b-dev':'b-none';
@@ -488,7 +504,7 @@ function renderAll(){
 }
 
 window.toggleW = sym => { state.watch.has(sym)?state.watch.delete(sym):state.watch.add(sym); localStorage.setItem('bn_watch',JSON.stringify([...state.watch])); renderAll(); };
-window.openCoin = (sym, side=null) => { state.selectedCoin = sym; state.prefSide = side; switchTab('coin'); loadCoinChart(); };
+window.openCoin = (sym, side=null) => { state.selectedCoin = sym; state.prefSide = side; switchTab('coin'); };
 
 let chartObj = null;
 async function loadCoinChart(){
@@ -611,7 +627,6 @@ async function loadCoinChart(){
   if(window._gridCharts){ window._gridCharts.forEach(c=>c.remove()); window._gridCharts=[]; }
   const is4x = state.layout === '4x';
   document.getElementById('singleChartWrap').classList.toggle('hide', is4x);
-  document.getElementById('tfBar').classList.toggle('hide', is4x);
   const gridEl = document.getElementById('mtfGridWrap');
   gridEl.classList.toggle('hide', !is4x);
 
@@ -638,13 +653,14 @@ async function loadCoinChart(){
       const gkl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${gtf}&limit=${gtf==='1d'?99:200}`).then(r=>r.json()).catch(()=>null);
       const gd = analyzeCandles(gkl); const el = document.getElementById('gstage-'+gtf);
       if(!gd || !el) return;
-      const gc = LightweightCharts.createChart(el, { width:el.clientWidth, height:270, layout:{background:{color:'#0b0f17'},textColor:'#94a3b8',fontSize:10}, grid:{vertLines:{color:'rgba(148,163,184,0.04)'},horzLines:{color:'rgba(148,163,184,0.04)'}}, timeScale:{timeVisible:true,rightOffset:5} });
+      const gpf = chartPriceFmt(gd.cur);
+      const gc = LightweightCharts.createChart(el, { width:el.clientWidth, height:270, layout:{background:{color:'#0b0f17'},textColor:'#94a3b8',fontSize:10}, grid:{vertLines:{color:'rgba(148,163,184,0.04)'},horzLines:{color:'rgba(148,163,184,0.04)'}}, rightPriceScale:{autoScale:true,minimumWidth:64}, timeScale:{timeVisible:true,rightOffset:5} });
       window._gridCharts.push(gc);
-      const gcs = gc.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444' });
+      const gcs = gc.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444', lastValueVisible:true, priceLineVisible:true, priceFormat:gpf });
       gcs.setData(gd.t.map((tm,i)=>({ time:Math.floor(tm/1000), open:gd.o[i], high:gd.h[i], low:gd.l[i], close:gd.c[i] })));
       if(gd.n>20) gc.timeScale().setVisibleLogicalRange({ from:Math.max(0,gd.n-65), to:gd.n+4 });
       [['ema20','rgba(56,189,248,.7)'],['ema50','rgba(245,158,11,.7)']].forEach(([k,col])=>{
-        const ls = gc.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false });
+        const ls = gc.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false, priceFormat:gpf });
         ls.setData(gd.t.map((tm,i)=>({ time:Math.floor(tm/1000), value:gd[k][i] })));
       });
       gcs.setMarkers(buildCleanMarkers(gd, 3, 1));
@@ -655,18 +671,20 @@ async function loadCoinChart(){
   }
 
   const stage = document.getElementById('chartStage');
+  const pf = chartPriceFmt(d.cur);
   const chart = LightweightCharts.createChart(stage, {
     width: stage.clientWidth, height: 500,
     layout:{ background:{ color:'#0b0f17' }, textColor:'#94a3b8' },
     grid:{ vertLines:{ color:'rgba(148,163,184,0.05)' }, horzLines:{ color:'rgba(148,163,184,0.05)' } },
+    rightPriceScale:{ autoScale:true, minimumWidth:76 },
     timeScale:{ timeVisible:true, rightOffset:6 }
   });
   chartObj = chart;
-  const cs = chart.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444' });
+  const cs = chart.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444', lastValueVisible:true, priceLineVisible:true, priceFormat:pf });
   cs.setData(d.t.map((tm,i)=>({ time:Math.floor(tm/1000), open:d.o[i], high:d.h[i], low:d.l[i], close:d.c[i] })));
   if(d.n>20) chart.timeScale().setVisibleLogicalRange({ from:Math.max(0,d.n-95), to:d.n+5 });
   [['ema20','rgba(56,189,248,.75)'],['ema50','rgba(245,158,11,.75)'],['ema200','rgba(226,232,240,.65)']].forEach(([k,col])=>{
-    const ls = chart.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false });
+    const ls = chart.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false, priceFormat:pf });
     ls.setData(d.t.map((tm,i)=>({ time:Math.floor(tm/1000), value:d[k][i] })));
   });
   cs.setMarkers(buildCleanMarkers(d, 5, 2));
@@ -710,7 +728,12 @@ document.querySelectorAll('#layoutBar button').forEach(b=>b.onclick=()=>{
 });
 document.querySelectorAll('#tfBar button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('#tfBar button').forEach(x=>x.classList.remove('active'));
-  b.classList.add('active'); state.selectedTf=b.dataset.tf; loadCoinChart();
+  b.classList.add('active'); state.selectedTf=b.dataset.tf;
+  if(state.layout==='4x'){
+    state.layout='1x';
+    document.querySelectorAll('#layoutBar button').forEach(x=>x.classList.toggle('active', x.dataset.ly==='1x'));
+  }
+  loadCoinChart();
 });
 document.getElementById('coinSel').onchange = e => { state.selectedCoin = e.target.value; state.prefSide = null; loadCoinChart(); };
 document.getElementById('rescanBtn').onclick = scanAll;
