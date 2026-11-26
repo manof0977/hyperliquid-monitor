@@ -510,11 +510,48 @@ async function loadCoinChart(){
     <div class="kv"><span class="muted">Risk / Reward</span><b class="mono">${pl?.rr?pl.rr+'R':'—'}</b></div>
     <div class="kv"><span class="muted">RSI(14) / Trend</span><b class="mono">${d.rsi[d.n-1].toFixed(1)} / ${d.trend.toUpperCase()}</b></div>`;
 
-  // Render Plain-English Breakdown below the chart
+  // Render Plain-English Breakdown + Next-Move Scenario Map below the chart
   const tfUp = tf.toUpperCase(), stName = sum?.status || 'NO SETUP', sideName = sum?.side || 'LONG';
   const lastBr = d.breaks[d.breaks.length-1], bullObs = d.obs.filter(o=>o.kind==='bullish'), bearObs = d.obs.filter(o=>o.kind==='bearish');
   const rsiNow = d.rsi[d.n-1], bullTfs = Object.entries(sum?.biases||{}).filter(([,v])=>v==='BULLISH').map(([k])=>k.toUpperCase());
   const bearTfs = Object.entries(sum?.biases||{}).filter(([,v])=>v==='BEARISH').map(([k])=>k.toUpperCase());
+  const bullComb = (sum?.long_tech??50)*0.55 + (sum?.long_opp??50)*0.45;
+  const bearComb = (sum?.short_tech??50)*0.55 + (sum?.short_opp??50)*0.45;
+  const bullWt = Math.round((bullComb / Math.max(bullComb + bearComb, 1)) * 100);
+  const bearWt = 100 - bullWt;
+  const sHighs = d.swings.filter(s=>s.kind==='high'&&s.price>d.cur).sort((a,b)=>a.price-b.price);
+  const sLows = d.swings.filter(s=>s.kind==='low'&&s.price<d.cur).sort((a,b)=>b.price-a.price);
+  const nearRes = sHighs[0]?.price || (bearObs[bearObs.length-1]?.bot);
+  const nearSup = sLows[0]?.price || (bullObs[bullObs.length-1]?.top);
+  const nearFvg = d.fvgs[d.fvgs.length-1];
+  const primaryMagnet = nearFvg
+    ? `Unfilled ${nearFvg.kind} FVG midpoint at ${fmtP((nearFvg.top+nearFvg.bot)/2)}`
+    : nearRes && (!nearSup || Math.abs(nearRes-d.cur) <= Math.abs(d.cur-nearSup))
+    ? `Resting buy-stops above Swing High ${fmtP(nearRes)}`
+    : nearSup ? `Resting sell-stops below Swing Low ${fmtP(nearSup)}` : 'Waiting for fresh swing pool';
+  const bullPathTxt = `Hold above ${nearSup?fmtP(nearSup):'demand support'} and close above ${nearRes?fmtP(nearRes):'local swing high'} to open upside liquidity toward ${sHighs.slice(0,2).map(x=>fmtP(x.price)).join(' → ')||'higher HTF supply'}.`;
+  const bearPathTxt = `Reject below ${nearRes?fmtP(nearRes):'supply cap'} or lose ${nearSup?fmtP(nearSup):'structural support'} on a candle close to draw price toward ${sLows.slice(0,2).map(x=>fmtP(x.price)).join(' → ')||'lower HTF demand'}.`;
+  let sentHtml = '';
+  if(state.ep?.kind==='futures'){
+    try {
+      const fOrigin = state.ep.rest.replace(/\/fapi\/v1$/, '');
+      const per = ['5m','15m','1h','4h','1d'].includes(tf)?tf:'1h';
+      const [pr, oi, gls, tls] = await Promise.all([
+        fetch(`${state.ep.rest}/premiumIndex?symbol=${sym}`).then(r=>r.ok?r.json():null).catch(()=>null),
+        fetch(`${state.ep.rest}/openInterest?symbol=${sym}`).then(r=>r.ok?r.json():null).catch(()=>null),
+        fetch(`${fOrigin}/futures/data/globalLongShortAccountRatio?symbol=${sym}&period=${per}&limit=1`).then(r=>r.ok?r.json():null).catch(()=>null),
+        fetch(`${fOrigin}/futures/data/topLongShortPositionRatio?symbol=${sym}&period=${per}&limit=1`).then(r=>r.ok?r.json():null).catch(()=>null),
+      ]);
+      if(pr){
+        const fr = +(parseFloat(pr.lastFundingRate||'0')*100).toFixed(4);
+        const oiUsd = oi ? parseFloat(oi.openInterest||'0')*d.cur : 0;
+        const rl = Array.isArray(gls)&&gls[0] ? +(parseFloat(gls[0].longAccount||'0')*100).toFixed(1) : null;
+        const wl = Array.isArray(tls)&&tls[0] ? +(parseFloat(tls[0].longAccount||'0')*100).toFixed(1) : null;
+        const sqNote = fr>0.03 ? 'Crowded Long Funding — watch for downside stop-hunt.' : fr<-0.015 ? 'Negative Funding (crowded shorts) — elevated short-squeeze fuel.' : (rl&&wl&&rl>=63&&wl<=48) ? 'Retail heavily Long while Top Whales lean Short — fade unconfirmed breakouts.' : (rl&&wl&&rl<=42&&wl>=55) ? 'Top Whales accumulating Longs while Retail shorts — institutional divergence.' : 'Perpetual positioning is balanced without extreme crowding.';
+        sentHtml = `<div style="margin-top:10px;padding:8px 12px;border-radius:7px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);font-size:12px;color:#e2e8f0"><b style="color:#fcd34d">Futures Positioning & Squeeze Read:</b> ${sqNote} <span class="mono muted" style="margin-left:8px">[Funding: ${fr>=0?'+':''}${fr}%${oiUsd?` • OI: ${fmtV(oiUsd)}`:''}${rl!=null?` • Retail L: ${rl}%`:''}${wl!=null?` • Whales L: ${wl}%`:''}]</span></div>`;
+      }
+    } catch {}
+  }
   const verdict = stName.includes('CONFIRMED')
     ? `<b>${sym}</b> has an active <b>${stName}</b> setup at <b>${fmtP(d.cur)}</b> — higher-timeframe structure, entry-zone proximity, lower-timeframe break confirmation, and Risk/Reward all align.`
     : stName.includes('DEVELOPING')
@@ -524,6 +561,21 @@ async function loadCoinChart(){
     : `<b>${sym}</b> currently shows <b>NO ACTIONABLE SETUP</b> at <b>${fmtP(d.cur)}</b> (Long Tech: ${sum?.long_tech??0}/100 vs Short Tech: ${sum?.short_tech??0}/100) — stand aside until price reaches a clean structural zone.`;
   document.getElementById('plainEnglishBody').innerHTML = `
     <div style="padding:11px 14px;border-radius:8px;background:rgba(56,189,248,.09);border-left:4px solid var(--accent);color:#f1f5f9;margin-bottom:12px;line-height:1.5">${verdict}</div>
+    <div style="background:rgba(30,41,59,.72);border:1px solid rgba(56,189,248,.32);border-radius:9px;padding:13px 15px;margin-bottom:12px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center;margin-bottom:9px">
+        <div><div style="font-size:10.5px;font-weight:800;letter-spacing:.06em;color:var(--accent)">WHAT'S LIKELY NEXT — SCENARIO & LIQUIDITY MAGNET MAP</div><b style="font-size:13.5px;color:#f8fafc">Confluence Weight Split: Bullish ${bullWt}% vs Bearish ${bearWt}%</b></div>
+        <div style="background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.35);padding:5px 10px;border-radius:6px;font-size:12px"><span class="muted">#1 Magnet:</span> <b class="mono accent">${primaryMagnet}</b></div>
+      </div>
+      <div style="display:flex;height:20px;border-radius:5px;overflow:hidden;font-size:11px;font-weight:700;margin-bottom:10px">
+        <div style="width:${bullWt}%;background:rgba(16,185,129,.65);color:#ecfdf5;display:flex;align-items:center;padding-left:8px">Bull ${bullWt}%</div>
+        <div style="width:${bearWt}%;background:rgba(239,68,68,.65);color:#fef2f2;display:flex;align-items:center;justify-content:flex-end;padding-right:8px">Bear ${bearWt}%</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;font-size:12.5px;line-height:1.5">
+        <div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.3);border-radius:7px;padding:10px 12px"><b class="bull">▲ Scenario A — Bullish Path</b><p style="margin:4px 0 0;color:#e2e8f0">${bullPathTxt}</p></div>
+        <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:7px;padding:10px 12px"><b class="bear">▼ Scenario B — Bearish Path</b><p style="margin:4px 0 0;color:#e2e8f0">${bearPathTxt}</p></div>
+      </div>
+      ${sentHtml}
+    </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;color:#cbd5e1;line-height:1.55">
       <div style="background:var(--panel2);padding:12px 14px;border-radius:8px;border:1px solid var(--border)">
         <b class="accent">1. Multi-Timeframe Alignment</b>

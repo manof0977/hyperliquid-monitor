@@ -100,9 +100,25 @@ def test_plain_english_report_generation():
     summary = analyze_symbol({tf: df for tf in ("5m", "15m", "1h", "4h", "1d", "1w")})
     summary["price"] = float(df["close"].iloc[-1])
     summary["change_24h"] = 2.35
-    rep = build_plain_english_report("BTCUSDT", "1h", tf_detail, summary)
+    sentiment = {
+        "funding_rate_pct": -0.025,
+        "basis_pct": -0.08,
+        "open_interest": 12500.0,
+        "retail_long_pct": 38.0,
+        "retail_short_pct": 62.0,
+        "top_trader_long_pct": 59.0,
+        "top_trader_short_pct": 41.0,
+    }
+    rep = build_plain_english_report("BTCUSDT", "1h", tf_detail, summary, sentiment=sentiment)
     assert rep is not None
     assert rep["symbol"] == "BTCUSDT"
     assert len(rep["sections"]) == 6
     assert "BTCUSDT" in rep["headline"]
+    nm = rep["next_move_map"]
+    assert nm["bull_weight_pct"] + nm["bear_weight_pct"] == 100
+    assert nm["favored"] in ("BULLISH", "BEARISH", "BALANCED")
+    assert nm["primary_magnet"]
+    assert nm["bull_scenario"] and nm["bear_scenario"]
+    assert nm["positioning_read"] and "negative funding" in nm["positioning_read"].lower()
+    assert "smart-money divergence" in nm["positioning_read"].lower()
 

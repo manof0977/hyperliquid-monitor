@@ -76,6 +76,26 @@ export interface CandlePoint {
   rsi14: number | null;
 }
 
+export interface NextMoveMap {
+  favored: 'BULLISH' | 'BEARISH' | 'BALANCED';
+  bull_weight_pct: number;
+  bear_weight_pct: number;
+  lean_label: string;
+  primary_magnet: string;
+  bull_scenario: string;
+  bear_scenario: string;
+  positioning_read?: string | null;
+  positioning_metrics?: {
+    funding_rate_pct?: number;
+    basis_pct?: number;
+    open_interest_usd?: number;
+    retail_long_pct?: number;
+    retail_short_pct?: number;
+    top_trader_long_pct?: number;
+    top_trader_short_pct?: number;
+  };
+}
+
 export interface ExplanationSection {
   title: string;
   summary: string;
@@ -87,6 +107,7 @@ export interface ExplanationReport {
   tf: string;
   tone: 'bullish' | 'bearish' | 'warning' | 'neutral';
   headline: string;
+  next_move_map?: NextMoveMap;
   sections: ExplanationSection[];
 }
 
@@ -120,6 +141,7 @@ export interface CoinPayload {
     div: Record<string, boolean>;
   } | null;
   summary: ScanRow | null;
+  sentiment?: Record<string, number> | null;
   explanation?: ExplanationReport | null;
 }
 

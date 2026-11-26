@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { apiGet, CoinPayload, fmtPrice } from '../api/client';
+import { apiGet, CoinPayload, fmtPrice, fmtVol } from '../api/client';
 import { binanceBridge } from '../api/binanceBridge';
 import { BiasPill, ScoreCell, StatusBadge } from '../components/Badges';
 import { SMCChart } from '../components/SMCChart';
@@ -39,6 +39,11 @@ export const CoinAnalysisPage: React.FC<Props> = ({
         let d = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
         if (alive && d.candles.length === 0) {
           const ok = await binanceBridge.syncSingleSymbolNow(symbol);
+          if (ok && alive) {
+            d = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
+          }
+        } else if (alive && !d.sentiment) {
+          const ok = await binanceBridge.syncSymbolSentiment(symbol, tf);
           if (ok && alive) {
             d = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
           }
@@ -168,6 +173,56 @@ export const CoinAnalysisPage: React.FC<Props> = ({
               <div><span>Dealing Range</span><strong className="mono">{ov?.smc.zone?.toUpperCase() ?? '—'}</strong></div>
             </div>
           </div>
+
+          {data?.sentiment && (
+            <div className="panel">
+              <h3>Futures Positioning & Squeeze Data</h3>
+              <div className="kv-list">
+                {data.sentiment.funding_rate_pct !== undefined && (
+                  <div>
+                    <span>Funding Rate (8H)</span>
+                    <strong className={`mono ${data.sentiment.funding_rate_pct > 0.025 ? 'bear-txt' : data.sentiment.funding_rate_pct < -0.01 ? 'bull-txt' : ''}`}>
+                      {data.sentiment.funding_rate_pct >= 0 ? '+' : ''}
+                      {Number(data.sentiment.funding_rate_pct).toFixed(4)}%
+                    </strong>
+                  </div>
+                )}
+                {data.sentiment.basis_pct !== undefined && (
+                  <div>
+                    <span>Perp vs Spot Basis</span>
+                    <strong className="mono">
+                      {data.sentiment.basis_pct >= 0 ? '+' : ''}
+                      {Number(data.sentiment.basis_pct).toFixed(3)}%
+                    </strong>
+                  </div>
+                )}
+                {data.sentiment.open_interest !== undefined && sum?.price ? (
+                  <div>
+                    <span>Open Interest</span>
+                    <strong className="mono">{fmtVol(Number(data.sentiment.open_interest) * sum.price)}</strong>
+                  </div>
+                ) : null}
+                {data.sentiment.retail_long_pct !== undefined && (
+                  <div>
+                    <span>Retail Accounts (L / S)</span>
+                    <strong className="mono">
+                      <span className="bull-txt">{data.sentiment.retail_long_pct}%</span> /{' '}
+                      <span className="bear-txt">{(100 - Number(data.sentiment.retail_long_pct)).toFixed(1)}%</span>
+                    </strong>
+                  </div>
+                )}
+                {data.sentiment.top_trader_long_pct !== undefined && (
+                  <div>
+                    <span>Top Whales (L / S)</span>
+                    <strong className="mono">
+                      <span className="bull-txt">{data.sentiment.top_trader_long_pct}%</span> /{' '}
+                      <span className="bear-txt">{(100 - Number(data.sentiment.top_trader_long_pct)).toFixed(1)}%</span>
+                    </strong>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {ov && (
             <div className="panel">

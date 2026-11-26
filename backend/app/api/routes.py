@@ -81,6 +81,18 @@ async def api_bridge_ws(body: BridgeWsBatchBody):
     return {"ok": True}
 
 
+class BridgeSentimentBody(BaseModel):
+    symbol: str
+    data: dict
+
+
+@router.post("/bridge/sentiment")
+async def api_bridge_sentiment(body: BridgeSentimentBody):
+    eng = get_engine()
+    await eng.ingest_bridge_sentiment(body.symbol, body.data)
+    return {"ok": True}
+
+
 @router.get("/scanner")
 async def api_scanner(
     search: str = "",
