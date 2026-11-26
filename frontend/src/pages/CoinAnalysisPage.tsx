@@ -42,10 +42,15 @@ export const CoinAnalysisPage: React.FC<Props> = ({
   const [manualSide, setManualSide] = useState<'LONG' | 'SHORT' | null>(preferredSide ?? null);
   const [showRulesHelp, setShowRulesHelp] = useState(false);
 
-  // Sync manualSide whenever symbol or preferredSide changes from Scanner / Opportunities
+  // Sync manualSide & clear stale coin chart whenever symbol changes
   useEffect(() => {
     setManualSide(preferredSide ?? null);
+    setData((prev) => (prev && prev.symbol === symbol ? prev : null));
+    setMultiData({});
   }, [symbol, preferredSide]);
+
+  const splitLeft = splitTfs[0];
+  const splitRight = splitTfs[1];
 
   // Load primary chart + any visible multi-timeframe charts in parallel
   useEffect(() => {
@@ -56,7 +61,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
       layout === '4x'
         ? Array.from(new Set([tf, ...GRID_4_TFS]))
         : layout === '2x'
-        ? Array.from(new Set([tf, ...splitTfs]))
+        ? Array.from(new Set([tf, splitLeft, splitRight]))
         : [tf];
 
     const load = async () => {
@@ -78,7 +83,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
 
         const extraTfs = neededTfs.filter((k) => k !== tf);
         if (extraTfs.length > 0) {
-          const results = await Promise.all(
+          let results = await Promise.all(
             extraTfs.map(async (k) => {
               try {
                 return [k, await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${k}`)] as const;
@@ -87,6 +92,21 @@ export const CoinAnalysisPage: React.FC<Props> = ({
               }
             })
           );
+          // If any secondary timeframe had 0 candles, sync all 6 TFs once and re-read
+          if (alive && results.some((it) => it && it[1].candles.length === 0)) {
+            const ok = await binanceBridge.syncSingleSymbolNow(symbol);
+            if (ok && alive) {
+              results = await Promise.all(
+                extraTfs.map(async (k) => {
+                  try {
+                    return [k, await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${k}`)] as const;
+                  } catch {
+                    return null;
+                  }
+                })
+              );
+            }
+          }
           if (!alive) return;
           const nextMap: Record<string, CoinPayload> = { [tf]: first };
           for (const item of results) {
@@ -96,6 +116,8 @@ export const CoinAnalysisPage: React.FC<Props> = ({
         } else {
           setMultiData({ [tf]: first });
         }
+      } catch {
+        // Keep UI responsive even if a transient poll fails
       } finally {
         if (alive) setLoading(false);
       }
@@ -107,7 +129,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
       alive = false;
       clearInterval(id);
     };
-  }, [symbol, tf, layout, splitTfs]);
+  }, [symbol, tf, layout, splitLeft, splitRight]);
 
   const sum = data?.summary;
   const ov = data?.overlays;
@@ -171,15 +193,25 @@ export const CoinAnalysisPage: React.FC<Props> = ({
             </button>
           </div>
 
-          {layout === '1x' && (
-            <div className="seg-group">
-              {TFS.map((k) => (
-                <button key={k} className={`tf-btn ${tf === k ? 'active' : ''}`} onClick={() => setTf(k)}>
-                  {k.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          )}
+          {/* Timeframe Selector — Always visible! */}
+          <div className="seg-group">
+            {TFS.map((k) => (
+              <button
+                key={k}
+                className={`tf-btn ${tf === k ? 'active' : ''}`}
+                onClick={() => {
+                  setTf(k);
+                  if (layout === '4x' && !GRID_4_TFS.includes(k)) {
+                    setLayout('1x');
+                  } else if (layout === '2x' && !splitTfs.includes(k)) {
+                    setSplitTfs([splitTfs[0], k]);
+                  }
+                }}
+              >
+                {k.toUpperCase()}
+              </button>
+            ))}
+          </div>
 
           {/* Clean vs Full Label Density Switcher */}
           <div className="seg-group" title="Clean mode filters out historical box/label clutter so candles stay readable">
@@ -212,8 +244,9 @@ export const CoinAnalysisPage: React.FC<Props> = ({
           {/* 1x SINGLE CHART */}
           {layout === '1x' && (
             <div className="panel chart-panel">
-              {data && data.candles.length > 0 ? (
+              {data && data.symbol === symbol && data.candles.length > 0 ? (
                 <SMCChart
+                  key={`${symbol}-${tf}`}
                   data={data}
                   showEMA={showEMA}
                   showOB={showOB}
@@ -226,7 +259,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
                 />
               ) : (
                 <div className="empty" style={{ height: 500, display: 'grid', placeItems: 'center' }}>
-                  {loading ? `Loading ${symbol} ${tf} klines…` : 'No candle data available yet (check Binance connection).'}
+                  {loading ? `Loading ${symbol} ${tf.toUpperCase()} klines…` : 'No candle data available yet (check Binance connection).'}
                 </div>
               )}
             </div>

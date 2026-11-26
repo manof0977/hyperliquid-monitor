@@ -131,6 +131,8 @@ export interface ExplanationReport {
 export interface CoinPayload {
   symbol: string;
   tf: string;
+  tick_size?: number | null;
+  price_precision?: number | null;
   candles: CandlePoint[];
   overlays: {
     structure: {
@@ -178,13 +180,46 @@ export async function apiSend<T>(path: string, method: string, body?: unknown): 
   return r.json();
 }
 
+export function resolvePriceFormat(
+  samplePrice?: number | null,
+  tickSize?: number | null,
+  pricePrecision?: number | null
+): { precision: number; minMove: number } {
+  // 1. Exact Binance PRICE_FILTER tickSize when available (e.g. 0.00001 -> precision 5)
+  if (tickSize && tickSize > 0 && tickSize < 1) {
+    const dec = Math.min(8, Math.max(2, Math.round(-Math.log10(tickSize))));
+    return { precision: dec, minMove: Number((10 ** -dec).toFixed(dec)) };
+  }
+  if (pricePrecision && pricePrecision >= 2 && pricePrecision <= 8) {
+    return {
+      precision: pricePrecision,
+      minMove: Number((10 ** -pricePrecision).toFixed(pricePrecision)),
+    };
+  }
+  // 2. Dynamic TradingView-style fallback from coin price magnitude
+  const a = Math.abs(samplePrice || 0);
+  let dec = 4;
+  if (a >= 1000) dec = 2;
+  else if (a >= 10) dec = 3;
+  else if (a >= 1) dec = 4;
+  else if (a >= 0.1) dec = 5;
+  else if (a >= 0.01) dec = 6;
+  else if (a >= 0.001) dec = 7;
+  else if (a > 0) dec = 8;
+  return { precision: dec, minMove: Number((10 ** -dec).toFixed(dec)) };
+}
+
 export function fmtPrice(p?: number | null): string {
   if (p === null || p === undefined || Number.isNaN(p)) return '—';
   const a = Math.abs(p);
+  if (a === 0) return '0.00';
   if (a >= 1000) return p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (a >= 10) return p.toFixed(3);
   if (a >= 1) return p.toFixed(4);
-  if (a >= 0.01) return p.toFixed(5);
-  return p.toPrecision(4);
+  if (a >= 0.1) return p.toFixed(5);
+  if (a >= 0.01) return p.toFixed(6);
+  if (a >= 0.001) return p.toFixed(7);
+  return p.toFixed(8);
 }
 
 export function fmtVol(v?: number | null): string {

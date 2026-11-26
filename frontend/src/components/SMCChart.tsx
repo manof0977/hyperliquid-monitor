@@ -10,7 +10,7 @@ import {
   Time,
   UTCTimestamp,
 } from 'lightweight-charts';
-import { CoinPayload, TradePlan } from '../api/client';
+import { CoinPayload, resolvePriceFormat, TradePlan } from '../api/client';
 
 interface Props {
   data: CoinPayload;
@@ -47,6 +47,8 @@ export const SMCChart: React.FC<Props> = ({
     if (!el) return;
 
     const isClean = detailMode === 'clean' || compact;
+    const lastClose = data.candles.length ? data.candles[data.candles.length - 1].close : data.summary?.price;
+    const pf = resolvePriceFormat(lastClose, data.tick_size, data.price_precision);
 
     const chart = createChart(el, {
       width: el.clientWidth,
@@ -61,7 +63,12 @@ export const SMCChart: React.FC<Props> = ({
         horzLines: { color: 'rgba(148,163,184,0.045)' },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#1e293b', scaleMargins: { top: 0.08, bottom: 0.2 } },
+      rightPriceScale: {
+        autoScale: true,
+        borderColor: '#1e293b',
+        minimumWidth: compact ? 64 : 78,
+        scaleMargins: { top: 0.08, bottom: 0.2 },
+      },
       timeScale: {
         borderColor: '#1e293b',
         timeVisible: true,
@@ -78,6 +85,9 @@ export const SMCChart: React.FC<Props> = ({
       borderDownColor: '#ef4444',
       wickUpColor: '#10b981',
       wickDownColor: '#ef4444',
+      lastValueVisible: true,
+      priceLineVisible: true,
+      priceFormat: { type: 'price', precision: pf.precision, minMove: pf.minMove },
     });
     seriesRef.current = candleSeries;
 
@@ -128,7 +138,13 @@ export const SMCChart: React.FC<Props> = ({
             ['ema200', '#e2e8f0'],
           ];
       for (const [key, color] of emaSpecs) {
-        const ls = chart.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+        const ls = chart.addLineSeries({
+          color,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          priceFormat: { type: 'price', precision: pf.precision, minMove: pf.minMove },
+        });
         ls.setData(
           data.candles
             .filter((c) => typeof c[key] === 'number')

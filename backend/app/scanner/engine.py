@@ -298,17 +298,24 @@ class ScannerEngine:
                     self.queue_bridge_symbol(symbol)
         if df is None or df.empty:
             summary = self.results.get(symbol)
+            meta = self.symbols_meta.get(symbol, {})
             return {
                 "symbol": symbol,
                 "tf": tf,
+                "tick_size": meta.get("tickSize"),
+                "price_precision": meta.get("pricePrecision"),
                 "candles": [],
                 "overlays": None,
                 "summary": summary,
                 "explanation": build_plain_english_report(symbol, tf, None, summary),
             }
 
-        d_df = self.candle_cache.get((symbol, "1d")) or await load_candles_df(symbol, "1d", 60)
-        w_df = self.candle_cache.get((symbol, "1w")) or await load_candles_df(symbol, "1w", 60)
+        d_df = self.candle_cache.get((symbol, "1d"))
+        if d_df is None or d_df.empty:
+            d_df = await load_candles_df(symbol, "1d", 60)
+        w_df = self.candle_cache.get((symbol, "1w"))
+        if w_df is None or w_df.empty:
+            w_df = await load_candles_df(symbol, "1w", 60)
         tf_detail = await asyncio.to_thread(
             analyze_timeframe, df, d_df if not d_df.empty else None, w_df if not w_df.empty else None
         )
@@ -342,10 +349,13 @@ class ScannerEngine:
                 "div": tf_detail["div"],
             }
         summary = self.results.get(symbol)
+        meta = self.symbols_meta.get(symbol, {})
         sentiment = await self._get_symbol_sentiment(symbol, tf)
         return {
             "symbol": symbol,
             "tf": tf,
+            "tick_size": meta.get("tickSize"),
+            "price_precision": meta.get("pricePrecision"),
             "candles": candles,
             "overlays": overlays,
             "summary": summary,
