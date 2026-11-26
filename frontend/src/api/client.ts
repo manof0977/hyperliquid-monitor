@@ -43,6 +43,85 @@ export interface TradePlan {
   ltf_confirmed?: boolean;
 }
 
+export interface PlaybookGate {
+  key: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface PlaybookFactor {
+  kind: string;
+  points: number;
+  label: string;
+}
+
+export interface PlaybookPoi {
+  zone?: [number, number];
+  low?: number;
+  high?: number;
+  mid?: number;
+  source?: string;
+  label?: string;
+  unmitigated?: boolean;
+  in_zone?: boolean;
+  at_value?: boolean;
+  distance_atr?: number;
+  confluence?: string[];
+  refined?: boolean;
+}
+
+export interface PlaybookSide {
+  side: string;
+  grade: string;
+  score: number;
+  setup_type?: string;
+  gates: PlaybookGate[];
+  gates_passed: number;
+  gates_total: number;
+  factors: PlaybookFactor[];
+  blockers: string[];
+  action: string;
+  poi?: PlaybookPoi | null;
+  entry_zone?: [number, number] | null;
+  entry?: number | null;
+  stop?: number | null;
+  stop_anchor?: string | null;
+  risk_atr?: number;
+  targets: number[];
+  rr1: number;
+  rr2: number;
+  partial_plan?: string | null;
+  management?: string;
+  session?: { name: string; quality: string; note: string; hour_utc: number };
+  bias_pct?: number;
+}
+
+export interface PlaybookResult {
+  grade: string;
+  label: string;
+  score: number;
+  side: string;
+  summary: string;
+  gates?: PlaybookGate[];
+  factors?: PlaybookFactor[];
+  blockers?: string[];
+  entry?: number | null;
+  stop?: number | null;
+  targets?: number[];
+  rr1?: number;
+  rr2?: number;
+  risk_atr?: number;
+  action?: string;
+  partial_plan?: string | null;
+  management?: string;
+  session?: { name: string; quality: string; note: string; hour_utc: number };
+  setup_type?: string;
+  gates_passed?: number;
+  gates_total?: number;
+  sides?: Record<string, PlaybookSide>;
+}
+
 export interface ScanRow {
   symbol: string;
   base_asset?: string;
@@ -71,6 +150,12 @@ export interface ScanRow {
   reaction_label?: string;
   reaction_lean?: string;
   reaction_summary?: string;
+  playbook?: PlaybookResult;
+  playbook_grade?: string;
+  playbook_label?: string;
+  playbook_score?: number;
+  playbook_side?: string;
+  playbook_summary?: string;
   entry_zone?: [number, number] | null;
   entry?: number | null;
   invalidation?: number | null;

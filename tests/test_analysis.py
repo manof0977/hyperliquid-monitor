@@ -361,3 +361,120 @@ def test_reaction_stays_out_of_confirmed_signal_state_machine():
     # Confirm the pre-indicator radar can't ever emit a CONFIRMED status string
     assert "CONFIRMED" not in scored["reaction_label"]
     assert "CONFIRMED" not in scored["reaction_state"]
+
+
+# ---------------------------------------------------------------------------
+# Institutional Setup Playbook + its causal backtester
+# ---------------------------------------------------------------------------
+from app.analysis.playbook import evaluate_playbook, _local_sweep  # noqa: E402
+from app.backtest.playbook_backtest import run_playbook_backtest     # noqa: E402
+
+
+def _mtf(direction: int = 1, n: int = 260, seed: int = 5) -> dict:
+    tfs = ["15m", "1h", "4h", "1d"]
+    return {tf: analyze_timeframe(_make_trend_df(n, direction)) for tf in tfs}
+
+
+def test_playbook_returns_graded_sides():
+    pb = evaluate_playbook(_mtf(1))
+    assert pb["grade"] in ("A+", "A", "B", "C", "NO-TRADE")
+    assert set(pb["sides"].keys()) == {"LONG", "SHORT"}
+    for side in ("LONG", "SHORT"):
+        s = pb["sides"][side]
+        assert 0.0 <= s["score"] <= 100.0
+        # A side with no usable POI is reported as NO-TRADE with no gates rather than fake gates
+        assert len(s["gates"]) == 7 or s["grade"] == "NO-TRADE"
+        assert s["gates_total"] == 7
+        assert isinstance(s["factors"], list)
+
+
+def test_playbook_grade_requires_every_gate():
+    """A/A+ must never be awarded while a checklist gate fails."""
+    pb = evaluate_playbook(_mtf(-1))
+    for side in ("LONG", "SHORT"):
+        s = pb["sides"][side]
+        if s["grade"] in ("A+", "A"):
+            assert all(g["passed"] for g in s["gates"]), f"{s['grade']} awarded with failing gates"
+            assert s["score"] >= 75.0
+
+
+def test_playbook_levels_are_structural_and_ordered():
+    pb = evaluate_playbook(_mtf(1))
+    for side, s in pb["sides"].items():
+        if not s.get("entry") or not s.get("stop") or not s.get("targets"):
+            continue
+        if side == "LONG":
+            assert s["stop"] < s["entry"] < min(s["targets"])
+        else:
+            assert s["stop"] > s["entry"] > max(s["targets"])
+        assert 0.25 <= s["risk_atr"] <= 4.0
+
+
+def test_playbook_is_deterministic():
+    a = evaluate_playbook(_mtf(1))
+    b = evaluate_playbook(_mtf(1))
+    assert a["grade"] == b["grade"] and a["score"] == b["score"]
+    assert a["sides"]["LONG"]["gates"] == b["sides"]["LONG"]["gates"]
+
+
+def test_playbook_handles_missing_data():
+    pb = evaluate_playbook({})
+    assert pb["grade"] == "NO-TRADE"
+    assert "No candle data" in pb["summary"]
+
+
+def test_local_sweep_detects_stop_hunt():
+    """A wick below the prior 25-bar low that closes back above must register as a sell-side sweep."""
+    rows = []
+    price = 100.0
+    for i in range(60):
+        rows.append((1700000000000 + i * 3_600_000, price, price + 0.5, price - 0.5, price, 1000.0))
+    # stop-hunt bar: deep wick below everything, closes back inside
+    last = rows[-1]
+    rows[-1] = (last[0], last[1], last[2], 90.0, last[1] + 0.2, 1500.0)
+    rows.append((rows[-1][0] + 3_600_000, rows[-1][4], rows[-1][4] + 0.6, rows[-1][4] - 0.3, rows[-1][4] + 0.4, 1200.0))
+    df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume"])
+    sw = _local_sweep(df, "bullish")
+    assert sw is not None and sw["kind"] == "sell-side"
+
+
+def test_playbook_backtest_is_causal_and_cost_aware():
+    df = _make_trend_df(320, 1)
+    rep = run_playbook_backtest("TESTUSDT", "1h", df, grades=["A+", "A", "B", "C"], step_bars=3)
+    assert rep["mode"] == "playbook"
+    assert rep["grade_counts"], "the backtester must record how often each grade occurred"
+    for t in rep["trades"]:
+        assert t["exit_time"] >= t["entry_time"], "no look-ahead: exit cannot precede entry"
+        if t["side"] == "LONG":
+            assert t["stop"] < t["entry"]
+        else:
+            assert t["stop"] > t["entry"]
+
+
+def test_playbook_backtest_costs_reduce_expectancy():
+    """Identical signals, higher costs => strictly lower net R. This is the anti-fabrication check."""
+    df = _make_trend_df(320, 1)
+    free = run_playbook_backtest("TESTUSDT", "1h", df, grades=["A+", "A", "B", "C"], fee_pct=0.0, slippage_pct=0.0)
+    paid = run_playbook_backtest("TESTUSDT", "1h", df, grades=["A+", "A", "B", "C"], fee_pct=0.10, slippage_pct=0.05)
+    if paid["total_trades"]:
+        assert paid["total_trades"] == free["total_trades"]
+        assert paid["total_r"] < free["total_r"], "fees/slippage must reduce net R"
+
+
+def test_playbook_backtest_never_trades_without_grades():
+    df = _make_trend_df(200, 1)
+    rep = run_playbook_backtest("TESTUSDT", "1h", df, grades=["A+"], step_bars=5)
+    assert rep["total_trades"] == 0 or all(t["grade"] == "A+" for t in rep["trades"])
+
+
+def test_scan_row_exposes_playbook_without_touching_signal_state():
+    mtf = _mtf(1)
+    scored = evaluate_symbol(mtf)
+    assert scored["playbook_grade"] in ("A+", "A", "B", "C", "NO-TRADE")
+    assert isinstance(scored["playbook"], dict)
+    # The grade must never leak into, or rewrite, the candle-close signal state machine
+    assert scored["status"] in (
+        "LONG CONFIRMED", "SHORT CONFIRMED", "LONG DEVELOPING", "SHORT DEVELOPING",
+        "LONG WATCH", "SHORT WATCH", "INVALIDATED", "NO SETUP",
+    )
+    assert "playbook" not in scored["status"].lower()

@@ -19,6 +19,7 @@ BOS/CHoCH + price inside/rejecting a real structural zone + valid structural R:R
 """
 from app.config import settings
 from app.analysis.reaction import classify_pre_indicator_reaction
+from app.analysis.playbook import evaluate_playbook
 
 TF_WEIGHTS = {"1w": 3.0, "1d": 3.0, "4h": 2.5, "1h": 2.0, "15m": 1.5, "5m": 1.0}
 
@@ -419,11 +420,13 @@ def evaluate_symbol(mtf: dict[str, dict], prev_state: dict | None = None) -> dic
     if prev_state and prev_state.get("status") in ("LONG CONFIRMED", "LONG DEVELOPING") and prev_state.get("invalidation"):
         if cur < prev_state["invalidation"] and s_rank < 2:
             return _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
-                         "INVALIDATED", "LONG", l_stat, s_stat, early_reasons, primary, primary_tf)
+                         "INVALIDATED", "LONG", l_stat, s_stat, early_reasons, primary, primary_tf,
+                         playbook=_safe_playbook(mtf, primary_tf))
     if prev_state and prev_state.get("status") in ("SHORT CONFIRMED", "SHORT DEVELOPING") and prev_state.get("invalidation"):
         if cur > prev_state["invalidation"] and l_rank < 2:
             return _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
-                         "INVALIDATED", "SHORT", l_stat, s_stat, early_reasons, primary, primary_tf)
+                         "INVALIDATED", "SHORT", l_stat, s_stat, early_reasons, primary, primary_tf,
+                         playbook=_safe_playbook(mtf, primary_tf))
 
     if l_rank > s_rank or (l_rank == s_rank and l_rank > 0 and (long_tech + long_plan["opportunity_score"]) >= (short_tech + short_plan["opportunity_score"])):
         status, active_side = l_stat, "LONG"
@@ -439,12 +442,24 @@ def evaluate_symbol(mtf: dict[str, dict], prev_state: dict | None = None) -> dic
     elif status.startswith("LONG"):
         active_side = "LONG"
 
+    playbook = _safe_playbook(mtf, primary_tf)
     return _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
-                 status, active_side, l_stat, s_stat, early_reasons, primary, primary_tf)
+                 status, active_side, l_stat, s_stat, early_reasons, primary, primary_tf,
+                 playbook=playbook)
+
+
+def _safe_playbook(mtf: dict, primary_tf: str) -> dict:
+    """Grade the institutional checklist, never letting an optional grade break the scanner."""
+    try:
+        return evaluate_playbook(mtf, sentiment=None, primary_tf=primary_tf)
+    except Exception as exc:
+        return {"grade": "NO-TRADE", "label": "NO TRADE", "score": 0.0, "side": "NONE",
+                "summary": f"Playbook unavailable: {exc}", "sides": {}}
 
 
 def _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
-          status, active_side, long_status, short_status, early_reasons, primary, primary_tf="1h") -> dict:
+          status, active_side, long_status, short_status, early_reasons, primary, primary_tf="1h",
+          playbook: dict | None = None) -> dict:
     active_plan = long_plan if active_side == "LONG" else short_plan
     rx = classify_pre_indicator_reaction(primary, biases=biases, sentiment=None, tf_label=primary_tf.upper())
     return {
@@ -470,6 +485,12 @@ def _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_pla
         "reaction_label": rx["badge_label"],
         "reaction_lean": rx["bias_lean"],
         "reaction_summary": rx["summary"],
+        "playbook": playbook or {},
+        "playbook_grade": (playbook or {}).get("grade", "NO-TRADE"),
+        "playbook_label": (playbook or {}).get("label", "NO TRADE"),
+        "playbook_score": (playbook or {}).get("score", 0.0),
+        "playbook_side": (playbook or {}).get("side", "NONE"),
+        "playbook_summary": (playbook or {}).get("summary", ""),
         "entry_zone": active_plan.get("entry_zone"),
         "entry": active_plan.get("entry"),
         "invalidation": active_plan.get("invalidation"),

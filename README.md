@@ -19,11 +19,13 @@ backend/app/
     smc.py               # Bullish/Bearish Order Blocks, 3-candle FVG, Liquidity Sweeps, EQH/EQL, Premium/Discount
     sr.py                # Swing S/R clusters, PDH/PDL, PWH/PWL, Supply/Demand zones, % & ATR distance
     reaction.py          # Pre-Indicator Price-Action Reaction Engine (Bounce / Pullback / Reversal / Mid-Range)
+    playbook.py          # Institutional Setup Playbook: 7-gate A+ checklist, confluence scoring, grade A+/A/B/C
     scoring.py           # Dual 0-100 Technical Score & Opportunity Score (LONG & SHORT), Signal State Machine, Early Watch
     pipeline.py          # Multi-timeframe (5m, 15m, 1h, 4h, 1d, 1w) orchestrator
   scanner/engine.py      # Async background scanner, incremental candle cache, live WS updates
   alerts/telegram.py     # Optional Telegram push notifications with strict transition de-duplication
   backtest/engine.py     # Causal walk-forward bar-by-bar backtester (zero look-ahead, configurable fees/slippage)
+  backtest/playbook_backtest.py  # Event-driven A/A+ playbook backtest (arm POI -> wait for tap -> grade at value)
   api/routes.py          # REST + /api/ws live terminal push endpoints
   main.py                # FastAPI app + SPA static serving for production deployments
 frontend/src/
@@ -64,6 +66,44 @@ Every reading ships with:
 - **`why_before_indicators`** evidence bullets (range position, ATR stretch, wick percentages, sweep levels, closed-bar run counts, divergence, funding crowding).
 
 Surfaces: a `Pre-Indicator Reaction` badge column plus filter (**Bounce Zones / Pullback Due / Reversal Sweeps / Mid-Range**) in the Market Scanner, a full **Reaction Radar** card in the Coin Analysis view, `reaction_state` / `reaction_label` / `reaction_summary` on every `/api/scanner` row, `pre_indicator_radar` on `/api/coin/{symbol}/explanation`, and the same engine re-implemented in `Binance_Scanner_Standalone.html`.
+
+---
+
+## Institutional Setup Playbook (the A+ checklist real traders run)
+
+`backend/app/analysis/playbook.py` grades **both sides of every contract** with the exact checklist
+consistently profitable discretionary / prop / SMC desks use, instead of a fuzzy "score":
+
+| # | Gate | Measurement |
+|---|------|-------------|
+| 1 | **HTF bias aligned** | Weighted 1W/1D/4H/1H agreement (≥ 40%) |
+| 2 | **Entry trigger** | A liquidity **sweep** that closed back inside (reversal model) **or** an **untested fresh POI** in trend direction (continuation model) |
+| 3 | **Displacement ≥ 1.8 ATR** | The impulse leg behind the last confirmed BOS/CHoCH |
+| 4 | **POI at value (≤ 0.75 ATR)** | Unmitigated OB / unfilled FVG / protected swing on the pullback side, in **discount** for longs and **premium** for shorts. Zones wider than 1.2 ATR are refined to their proximal 50% |
+| 5 | **LTF closed-candle shift** | Closed 15m/5m CHoCH, or a closed absorption/reversal candle at value |
+| 6 | **Structural stop 0.25–2.5 ATR** | Beyond the POI / sweep wick / swing — never a fixed percentage |
+| 7 | **R:R ≥ 2.0 (T1), ≥ 2.5 (T2)** | Real opposing structure (OB, S/R, dealing range) or a measured-move extension |
+
+**Grading:** `A+` = all gates + score ≥ 85 · `A` = all gates + score ≥ 75 · `B` = ≤ 2 gates missing + ≥ 55 (watchlist) · `C` = structurally weak · `NO-TRADE` = no valid POI.
+
+The 40 → 100 score is `40 + 35 × (gates passed / 7) + confluence`, where confluence is a transparent list of named bonuses and penalties:
+discount/premium location, displacement size, sweep depth, EQH/EQL pools, zone stacking (OB+FVG+S/R), volume expansion, divergence,
+EMA-squeeze expansion, PDH/PDL/PWH/PWL confluence, funding crowding (contrarian), over-extension from EMA20, consecutive-bar runs,
+stop width, and session liquidity (London/NY overlap vs Asia thin hours).
+
+**Surfaces**
+- `GET /api/playbook/{symbol}` — full grades, gates, factors, entry/stop/targets and management plan for both sides.
+- `GET /api/scanner?grade=TRADEABLE` (or `A+`/`A`/`B`/`C`) and `sort_by=playbook` — every row carries a compact grade.
+- **Setups (A+ Playbook)** tab, **Setup Grade** column + filter on the Market Scanner, and a full playbook panel in Coin Analysis.
+- `POST /api/backtest/playbook` + the Backtesting tab's **Institutional Playbook** mode.
+- The same engine is re-implemented in `Binance_Scanner_Standalone.html` (grade column, grade filter, coin playbook panel).
+
+**Honest backtesting.** `backend/app/backtest/playbook_backtest.py` is event-driven the way a trader actually operates:
+it **arms** a POI when bias aligns, waits for price to **trade into** the zone, and only then grades the full checklist
+*at value* — then manages 50% off at T1 with the stop moved to break-even. Every run is causal (only closed bars),
+cost-inclusive (fees + slippage on both sides) and reports trades, win rate, profit factor, expectancy in R, max drawdown,
+T1 hit rate and a per-grade breakdown. Setups are graded `A+`/`A` only when **every** gate passes — a high score can never
+skip a gate, and no grade can ever upgrade a `CONFIRMED` candle-close signal.
 
 ---
 

@@ -4,6 +4,8 @@ import { binanceBridge } from '../api/binanceBridge';
 import { BiasPill, ScoreCell, StatusBadge } from '../components/Badges';
 import { SMCChart } from '../components/SMCChart';
 import { PlainEnglishReport } from '../components/PlainEnglishReport';
+import { PlaybookPanel } from '../components/PlaybookCard';
+import type { PlaybookResult } from '../api/client';
 
 interface Props {
   symbol: string;
@@ -491,6 +493,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
         </div>
 
         <div className="side-panels">
+          <PlaybookPanel symbol={symbol} playbook={(sum as { playbook?: PlaybookResult } | null)?.playbook ?? null} />
           <div className="panel">
             <div className="panel-head">
               <h3>Multi-Timeframe Bias</h3>
