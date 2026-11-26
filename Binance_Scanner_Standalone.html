@@ -106,7 +106,7 @@
       <div class="two">
         <div class="panel">
           <h3 style="margin:0 0 10px">Highest Opportunity Setups</h3>
-          <table><thead><tr><th>Symbol</th><th>Price</th><th>24H</th><th>Long Opp</th><th>Short Opp</th><th>Status</th><th>Pre-Indicator Reaction</th></tr></thead><tbody id="dashTop"></tbody></table>
+          <table><thead><tr><th>Symbol</th><th>Price</th><th>24H</th><th>Long Opp</th><th>Short Opp</th><th>Status</th><th>Pre-Indicator Reaction</th><th>Setup Grade</th></tr></thead><tbody id="dashTop"></tbody></table>
         </div>
         <div class="panel">
           <h3 style="margin:0 0 10px">Early Watch Pre-Breakout Radar</h3>
@@ -136,11 +136,19 @@
           <option value="BEARISH_REVERSAL_ZONE">Top Reversal Zones</option>
           <option value="MID_RANGE_WAIT">Mid-Range Wait (no edge)</option>
         </select>
+        <select id="qGrade">
+          <option value="ALL">All Setup Grades</option>
+          <option value="TRADEABLE">Tradeable only (A+ / A)</option>
+          <option value="A+">A+ only</option>
+          <option value="A">A only</option>
+          <option value="B">B — watchlist</option>
+          <option value="C">C — do not trade</option>
+        </select>
         <label class="muted"><input type="checkbox" id="qEarly" /> Early Watch Only</label>
       </div>
       <div class="tblwrap">
         <table>
-          <thead><tr><th>★</th><th>Symbol</th><th>Price</th><th>24H</th><th>24H Vol</th><th>1D</th><th>4H</th><th>1H</th><th>15M</th><th>Long Tech</th><th>Short Tech</th><th>Long Opp</th><th>Short Opp</th><th>Status</th><th>Pre-Indicator Reaction</th></tr></thead>
+          <thead><tr><th>★</th><th>Symbol</th><th>Price</th><th>24H</th><th>24H Vol</th><th>1D</th><th>4H</th><th>1H</th><th>15M</th><th>Long Tech</th><th>Short Tech</th><th>Long Opp</th><th>Short Opp</th><th>Status</th><th>Pre-Indicator Reaction</th><th>Setup Grade</th></tr></thead>
           <tbody id="scanBody"></tbody>
         </table>
       </div>
@@ -185,6 +193,7 @@
             <div id="chartStage"><canvas id="overlayCanvas"></canvas></div>
           </div>
           <div id="mtfGridWrap" class="hide" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:14px"></div>
+          <div class="panel" id="pbPanel" style="display:none"></div>
           <div class="panel" id="rxRadarPanel" style="display:none"></div>
           <div class="panel" id="plainEnglishPanel">
             <h3 style="margin:0 0 10px">Full Plain-English Technical Breakdown</h3>
@@ -497,8 +506,252 @@ const rxBadgeHtml = (rx) => {
   return `<span class="badge" style="background:${col}22;color:${col};border:1px solid ${col}88" title="${(rx.summary||'').replace(/"/g,'&quot;')}">${rx.badge_label}</span>`;
 };
 
+
+// ---------------------------------------------------------------------------
+// INSTITUTIONAL SETUP PLAYBOOK — the A+ checklist (deterministic, no predictions)
+//   1 HTF bias  2 entry trigger (sweep OR fresh untested POI)  3 displacement >= 1.8 ATR
+//   4 POI at value <= 0.75 ATR (discount for longs / premium for shorts)
+//   5 closed-candle LTF/primary shift  6 structural stop 0.25-2.5 ATR  7 R:R T1>=2 / T2>=2.5
+//   A/A+ requires EVERY gate + score >= 75. Confluence factors shift the score, never the gates.
+// ---------------------------------------------------------------------------
+function pbTfBias(d){
+  if(!d) return 'NEUTRAL';
+  const st=d.trend, bull=d.bullStack, bear=d.bearStack, c=d.cur, e50=d.ema50[d.n-1];
+  const b=(st==='bullish'?2:0)+(bull?2:(c>e50?1:0));
+  const s=(st==='bearish'?2:0)+(bear?2:(c<e50?1:0));
+  if(b>=3&&b>s) return 'BULLISH';
+  if(s>=3&&s>b) return 'BEARISH';
+  return 'NEUTRAL';
+}
+
+function pbLocalSweep(d, dir){
+  const n=d.n, last=n-2, look=25;
+  if(last<look+3) return null;
+  for(let k=last;k>Math.max(look,last-25);k--){
+    let refLo=Infinity, refHi=-Infinity;
+    for(let j=k-look;j<=k-2;j++){ if(j<0) continue; refLo=Math.min(refLo,d.l[j]); refHi=Math.max(refHi,d.h[j]); }
+    if(dir==='bullish' && d.l[k]<refLo && d.c[k]>refLo) return {level:refLo,wick:d.l[k],i:k};
+    if(dir==='bearish' && d.h[k]>refHi && d.c[k]<refHi) return {level:refHi,wick:d.h[k],i:k};
+  }
+  return null;
+}
+
+function pbMicroShift(d, dir){
+  const n=d.n, last=n-2;
+  if(last<4) return null;
+  const rng=Math.max(d.h[last]-d.l[last],1e-9);
+  const lw=(Math.min(d.o[last],d.c[last])-d.l[last])/rng;
+  const uw=(d.h[last]-Math.max(d.o[last],d.c[last]))/rng;
+  if(dir==='bullish'){
+    let down=0; for(let k=last-2;k<=last;k++) if(d.c[k]<d.o[k]) down++;
+    if(d.c[last]>d.o[last] && d.c[last]>d.h[last-1] && down>=1) return 'Closed bullish reversal candle engulfs the prior bar';
+    if(lw>=0.40 && d.c[last]>=d.l[last]+0.55*rng) return 'Closed bullish absorption candle (lower rejection wick)';
+  } else {
+    let up=0; for(let k=last-2;k<=last;k++) if(d.c[k]>d.o[k]) up++;
+    if(d.c[last]<d.o[last] && d.c[last]<d.l[last-1] && up>=1) return 'Closed bearish reversal candle engulfs the prior bar';
+    if(uw>=0.40 && d.c[last]<=d.h[last]-0.55*rng) return 'Closed bearish absorption candle (upper rejection wick)';
+  }
+  return null;
+}
+
+function pbLeg(d, dir){
+  const brs=(d.breaks||[]).filter(b=>b.dir===dir && (d.n-b.i)<=60);
+  if(!brs.length) return null;
+  const br=brs[brs.length-1], swings=d.swings||[];
+  const prior=dir==='bullish'
+    ? swings.filter(x=>x.kind==='low'&&x.i<br.i) : swings.filter(x=>x.kind==='high'&&x.i<br.i);
+  if(!prior.length) return null;
+  const origin=prior[prior.length-1].p;
+  const after=dir==='bullish' ? swings.filter(x=>x.kind==='high'&&x.i>=br.i).map(x=>x.p)
+                              : swings.filter(x=>x.kind==='low'&&x.i>=br.i).map(x=>x.p);
+  const extreme = dir==='bullish' ? Math.max(...(after.length?after:[d.cur]), d.cur)
+                                  : Math.min(...(after.length?after:[d.cur]), d.cur);
+  const range=Math.abs(extreme-origin);
+  if(range<=0) return null;
+  return {origin,extreme,range,range_atr:range/d.curAtr,break_kind:br.kind,bars:d.n-br.i,
+    ote:[ dir==='bullish'? extreme-0.38*range : extreme-0.21*range,
+          dir==='bullish'? extreme-0.21*range : extreme-0.38*range ]};
+}
+
+function pbPois(d, side){
+  const isLong=side==='LONG', kind=isLong?'bullish':'bearish', out=[];
+  const push=(lo,hi,src,label,unmit)=>{
+    lo=Math.min(lo,hi); hi=Math.max(lo,hi);
+    const contains=d.cur>=lo&&d.cur<=hi;
+    const validSide = isLong ? hi<d.cur : lo>d.cur;
+    if(!(contains||validSide)) return;
+    const dist = contains?0:Math.min(Math.abs(d.cur-lo),Math.abs(d.cur-hi))/d.curAtr;
+    if(dist>6) return;
+    out.push({low:lo,high:hi,mid:(lo+hi)/2,source:src,label,unmitigated:!!unmit,
+      in_zone:contains,at_value:contains||dist<=0.75,distance_atr:+dist.toFixed(2),confluence:[]});
+  };
+  for(const ob of (d.obs||[])) if(ob.kind===kind) push(ob.bot,ob.top,'OB',
+    `${isLong?'Bullish Demand':'Bearish Supply'} Order Block`, true);
+  for(const g of (d.fvgs||[])) if(g.kind===kind) push(g.bot,g.top,'FVG',
+    `${isLong?'Bullish':'Bearish'} Fair Value Gap`, true);
+  const sw = isLong ? d.lastSwingLow : d.lastSwingHigh;
+  if(sw!=null && ((isLong&&sw<=d.cur*1.006)||(!isLong&&sw>=d.cur*0.994)))
+    push(sw-0.15*d.curAtr, sw+0.15*d.curAtr,'SWING', isLong?'Protected Swing Low':'Protected Swing High', true);
+  return out;
+}
+
+function playbookEngine(d, biases, sent){
+  if(!d) return {grade:'NO-TRADE',label:'NO TRADE',score:0,side:'NONE',summary:'No candle data.',sides:{},gates:[]};
+  biases=biases||{};
+  const htf=['1d','4h','1h'];
+  const evalSide=(side)=>{
+    const isLong=side==='LONG', dir=isLong?'bullish':'bearish', want=isLong?'BULLISH':'BEARISH';
+    const agree=htf.filter(t=>biases[t]===want), against=htf.filter(t=>biases[t]===(isLong?'BEARISH':'BULLISH'));
+    const biasPct=Math.round(agree.length/htf.filter(t=>biases[t]).length*100)||0;
+    const biasOk=agree.length>0 && biasPct>=40;
+
+    const leg=pbLeg(d,dir);
+    const dispOk=!!(leg&&leg.range_atr>=1.8);
+
+    let pois=pbPois(d,side);
+    // refine wide zones to their proximal 50%
+    pois=pois.map(p=>{
+      if(p.high-p.low<=1.2*d.curAtr) return p;
+      const lo=isLong? p.high-(p.high-p.low)*0.5 : p.low;
+      const hi=isLong? p.high : p.low+(p.high-p.low)*0.5;
+      return {...p,low:lo,high:hi,mid:(lo+hi)/2,refined:true,
+        in_zone:d.cur>=lo&&d.cur<=hi, at_value:(d.cur>=lo&&d.cur<=hi)||Math.min(Math.abs(d.cur-lo),Math.abs(d.cur-hi))/d.curAtr<=0.75};
+    });
+    if(!pois.length) return {side,grade:'NO-TRADE',score:0,gates:[],gates_passed:0,gates_total:7,factors:[],blockers:['No valid Point of Interest on the pullback side'],action:'Stand aside.',setup_type:'NO-STRUCTURE',targets:[]};
+    pois.sort((a,b)=>(b.at_value?2:0)- (a.at_value?2:0) || a.distance_atr-b.distance_atr);
+    const poi=pois[0];
+
+    const sweep=pbLocalSweep(d,dir);
+    const micro=pbMicroShift(d,dir);
+    const fresh=!!poi.unmitigated && poi.distance_atr<=3;
+    const triggerOk=!!sweep||fresh;
+    const setupType=sweep?'REVERSAL':(dispOk&&(poi.distance_atr<=3||fresh)?'CONTINUATION':'UNCONFIRMED');
+
+    // structural stop
+    const far=isLong?poi.low:poi.high;
+    let stopRaw=far;
+    if(sweep){
+      const sw= sweep.wick;
+      if((isLong&&far-1.2*d.curAtr<=sw&&sw<=far)||(!isLong&&far<=sw&&sw<=far+1.2*d.curAtr)) stopRaw=isLong?Math.min(far,sw):Math.max(far,sw);
+    }
+    const stop = isLong? stopRaw-0.25*d.curAtr : stopRaw+0.25*d.curAtr;
+    const entry = poi.in_zone? d.cur : (isLong?poi.high:poi.low);
+    const risk=Math.abs(entry-stop), riskAtr=risk/d.curAtr;
+    const stopOk=riskAtr>=0.25&&riskAtr<=2.5;
+
+    // structural targets
+    const cands=[];
+    if(isLong){
+      for(const s of (d.swings||[])) if(s.kind==='high'&&s.p>entry+0.6*d.curAtr) cands.push({p:s.p,src:'Opposing swing high'});
+      if(d.drHigh!=null&&d.drHigh>entry+0.6*d.curAtr) cands.push({p:d.drHigh,src:'Dealing-range high'});
+      cands.sort((a,b)=>a.p-b.p);
+    } else {
+      for(const s of (d.swings||[])) if(s.kind==='low'&&s.p<entry-0.6*d.curAtr) cands.push({p:s.p,src:'Opposing swing low'});
+      if(d.drLow!=null&&d.drLow<entry-0.6*d.curAtr) cands.push({p:d.drLow,src:'Dealing-range low'});
+      cands.sort((a,b)=>b.p-a.p);
+    }
+    const picked=[];
+    for(const c of cands){
+      if(picked.some(x=>Math.abs(x.p-c.p)<0.45*d.curAtr)) continue;
+      picked.push({...c,rr:risk>0?+(Math.abs(c.p-entry)/risk).toFixed(2):0});
+      if(picked.length===2) break;
+    }
+    if(leg){
+      const ext=isLong? leg.extreme+leg.range : leg.extreme-leg.range;
+      const rr=risk>0?+(Math.abs(ext-entry)/risk).toFixed(2):0;
+      if(rr>=1&&!picked.some(x=>Math.abs(x.p-ext)<d.curAtr)) picked.push({p:ext,src:'Measured-move extension',rr});
+    }
+    const rr1=picked.length?picked[0].rr:0, rr2=picked.length>1?picked[1].rr:rr1;
+    const rrOk=rr1>=2&&rr2>=2.5;
+
+    // factors
+    const factors=[];
+    const add=(pts,label)=>factors.push({points:pts,label});
+    if((isLong&&d.drPos!=null&&d.drPos<0.45)||(!isLong&&d.drPos!=null&&d.drPos>0.55)) add(6,`Entry on the ${isLong?'discount':'premium'} side of the dealing range`);
+    else if(d.drPos!=null) add(-7,`Wrong side of the range for a ${side}`);
+    if(dispOk) add(6,`Displacement leg ${leg.range_atr.toFixed(1)} ATR with ${leg.break_kind}`);
+    if(sweep) add(8,`Liquidity sweep of ${fmtP(sweep.level)} (${(d.n-2-sweep.i)} closed bars ago)`);
+    if(poi.confluence.length) add(Math.min(9,2.2*poi.confluence.length),'Confluence: '+poi.confluence.join(' · '));
+    if(d.volRatio>=1.5) add(5,`Volume expansion (${d.volRatio.toFixed(2)}x SMA20)`);
+    if(micro) add(5,micro);
+    const fr = sent && typeof sent.fundingRatePct==='number' ? sent.fundingRatePct : null;
+    if(fr!=null){
+      if(isLong&&fr<=-0.012) add(5,`Negative funding (${fr}%) — short-squeeze fuel`);
+      else if(!isLong&&fr>=0.025) add(5,`Crowded long funding (${fr}%) — fuel for shorts`);
+      else if(isLong&&fr>=0.025) add(-6,`Longs crowded (${fr}% funding)`);
+      else if(!isLong&&fr<=-0.012) add(-6,`Shorts crowded (${fr}% funding)`);
+    }
+    const stretch = d.stretchAtr!=null? d.stretchAtr : (d.cur-d.ema20[d.n-1])/d.curAtr;
+    if((isLong&&stretch>=2)||(!isLong&&stretch<=-2)) add(-9,`Price ${stretch>=0?'+':''}${stretch.toFixed(2)} ATR from EMA20 — that is chasing, not value`);
+    const run = isLong? d.consecUp : d.consecDn;
+    if(run>=6) add(-5,`${run} consecutive ${isLong?'bullish':'bearish'} closes — statistically stretched`);
+    if(riskAtr>2.5) add(-8,`Stop needs ${riskAtr.toFixed(2)} ATR of room`);
+    if(poi.distance_atr>2) add(-4,`POI is ${poi.distance_atr} ATR away`);
+    const hour = new Date().getUTCHours();
+    if(hour>=12&&hour<16) add(3,'London / New York overlap (deepest liquidity)');
+    else if(hour<7||hour>=21) add(-3,'Asia / off-hours (thin liquidity)');
+
+    const gates=[
+      {label:'HTF bias aligned',passed:biasOk,detail:`${biasPct}% HTF agreement (${agree.join(', ')||'none'})${against.length?' • against: '+against.join(', '):''}`},
+      {label:'Entry trigger: sweep (reversal) or untested fresh POI (continuation)',passed:triggerOk,
+       detail: sweep?`Sweep of ${fmtP(sweep.level)} closed back inside — reversal model`
+              : fresh?`No sweep, but the POI is untouched/fresh — continuation model`
+              : 'Neither a sweep nor a fresh untested POI — entry would be blind'},
+      {label:'Displacement leg ≥ 1.8 ATR',passed:dispOk,detail: leg?`${leg.range_atr.toFixed(2)} ATR ${leg.break_kind}, ${leg.bars} bars ago`:'No confirmed structural break'},
+      {label:'Price at value on the POI (≤ 0.75 ATR)',passed:!!poi.at_value,detail:`${poi.label} · ${fmtP(poi.low)}–${fmtP(poi.high)} · ${poi.distance_atr} ATR away`},
+      {label:'LTF closed-candle shift',passed:!!micro,detail: micro||'No closed reversal/absorption candle at value'},
+      {label:'Structural stop 0.25–2.5 ATR',passed:stopOk,detail:`Stop ${fmtP(stop)} = ${riskAtr.toFixed(2)} ATR beyond the POI`},
+      {label:'R:R ≥ 2.0 (T1) and ≥ 2.5 (T2)',passed:rrOk&&picked.length>0,detail:picked.length?`T1 ${rr1}R · T2 ${rr2}R`:'No opposing structure to target'},
+    ];
+    const passed=gates.filter(g=>g.passed).length;
+    const factorPts=factors.reduce((a,f)=>a+f.points,0);
+    const score=Math.max(0,Math.min(100, 40 + 35*(passed/gates.length) + Math.max(-25,Math.min(25,factorPts))));
+    let grade='C';
+    if(passed===gates.length && score>=85) grade='A+';
+    else if(passed===gates.length && score>=75) grade='A';
+    else if(passed>=gates.length-2 && score>=55 && picked.length) grade='B';
+    else if(!picked.length) grade='NO-TRADE';
+    const blockers=gates.filter(g=>!g.passed).map(g=>`${g.label} — ${g.detail}`);
+    const action = (grade==='A+'||grade==='A') ? `Limit ${isLong?'BUY':'SELL'} at the POI; add on the closed LTF ${dir} CHoCH inside the zone.`
+      : grade==='B' ? 'Watchlist only — set an alert at the POI and wait for the missing gate(s) to resolve.'
+      : 'Stand aside. This is not an A-grade location; forcing it is how accounts bleed.';
+    return {side,grade,score:+score.toFixed(1),gates,gates_passed:passed,gates_total:gates.length,
+      factors:factors.sort((a,b)=>Math.abs(b.points)-Math.abs(a.points)),blockers,action,setup_type:setupType,
+      entry:+entry.toFixed(8),stop:+stop.toFixed(8),risk_atr:+riskAtr.toFixed(2),
+      entry_zone:[+poi.low.toFixed(8),+poi.high.toFixed(8)],poi,
+      targets:picked.map(x=>+x.p.toFixed(8)),target_details:picked,rr1,rr2,
+      bias_pct:biasPct};
+  };
+  const L=evalSide('LONG'), S=evalSide('SHORT');
+  const order={'A+':5,A:4,B:3,C:2,'NO-TRADE':1};
+  const best = (order[L.grade]>=order[S.grade]) ? L : S;
+  let label, summary;
+  if(best.grade==='A+'||best.grade==='A'){
+    label=`${best.side} ${best.grade}`;
+    summary=`${best.side} ${best.grade} institutional-grade setup: ${best.gates_passed}/${best.gates_total} gates pass, ${best.score}/100 confluence. Entry ${fmtP(best.entry)} in ${best.poi.label}, stop ${fmtP(best.stop)} (${best.risk_atr} ATR), T1 ${best.rr1}R → T2 ${best.rr2}R.`;
+  } else if(best.grade==='B'){
+    label=`${best.side} B — WATCHLIST`;
+    summary=`${best.side} is forming but is not A-grade (${best.gates_passed}/${best.gates_total} gates, ${best.score}/100). ${best.blockers[0]||''}`;
+  } else {
+    label='NO TRADE';
+    summary=`No institutional-grade setup on either side right now. ${best.blockers[0]||'No displacement + POI + R:R structure worth risking capital on.'}`;
+  }
+  return {grade:best.grade,label,score:best.score,side:best.side,summary,sides:{LONG:L,SHORT:S},
+    gates:best.gates,factors:best.factors,blockers:best.blockers,entry:best.entry,stop:best.stop,
+    targets:best.targets,rr1:best.rr1,rr2:best.rr2,action:best.action,setup_type:best.setup_type};
+}
+
+const pbBadgeHtml=(pb)=>{
+  if(!pb) return '<span class="badge b-none">—</span>';
+  const col={ 'A+':'#10b981', A:'#38bdf8', B:'#f59e0b', C:'#94a3b8', 'NO-TRADE':'#64748b' }[pb.grade]||'#64748b';
+  return `<span class="badge" style="background:${col}22;color:${col};border:1px solid ${col}88" title="${(pb.summary||'').replace(/"/g,'&quot;')}">${pb.grade} · ${(pb.score||0).toFixed(0)}</span>`;
+};
+
 function scoreSymbol(sym, mtf, sent){
   const rxAll = {}; for(const k of Object.keys(mtf)) if(mtf[k]) rxAll[k] = reactionEngine(mtf[k], null, sent);
+  const pbKey = mtf['1h'] ? '1h' : (mtf['15m'] ? '15m' : Object.keys(mtf)[0]);
+  const pbBiases = {}; for(const k of Object.keys(mtf)) if(mtf[k]) pbBiases[k]=mtf[k].bias;
+  const pb = mtf[pbKey] ? playbookEngine(mtf[pbKey], pbBiases, sent) : null;
   const rxKey = mtf['1h'] ? '1h' : (mtf['15m'] ? '15m' : Object.keys(mtf)[0]);
   const rx = rxAll[rxKey] || null;
   const p = mtf['1h'] || mtf['15m']; if(!p) return null;
@@ -557,7 +810,8 @@ function scoreSymbol(sym, mtf, sent){
     biases, long_tech:L.tech, short_tech:S.tech, long_opp:L.opp, short_opp:S.opp,
     long_rr:L.rr, short_rr:S.rr, status, side, longPlan:L, shortPlan:S,
     early:early.length>0, earlyReasons:early, plan, mtf,
-    reaction:rx, reactionByTf:rxAll,
+    reaction:rx, reactionByTf:rxAll, playbook:pb,
+    playbook_grade: pb?pb.grade:'NO-TRADE', playbook_score: pb?pb.score:0, playbook_side: pb?pb.side:'NONE',
     reaction_state: rx?rx.state:'MID_RANGE_WAIT', reaction_label: rx?rx.badge_label:'MID-RANGE', reaction_summary: rx?rx.summary:''
   };
 }
@@ -666,6 +920,7 @@ function renderAll(){
       <td>${scoreHtml(r.long_opp,true)}</td><td>${scoreHtml(r.short_opp,false)}</td>
       <td>${badgeHtml(r.status,r.early)}</td>
       <td>${rxBadgeHtml(r.reaction)}</td>
+      <td>${pbBadgeHtml(r.playbook)}</td>
     </tr>`).join('');
 
   const earlyArr = arr.filter(x=>x.early);
@@ -680,6 +935,8 @@ function renderAll(){
   const sort = document.getElementById('qSort').value;
   const eo = document.getElementById('qEarly').checked;
   const rxF = document.getElementById('qReaction') ? document.getElementById('qReaction').value : 'ALL';
+  const gF = document.getElementById('qGrade') ? document.getElementById('qGrade').value : 'ALL';
+  const pbMatch = (g) => gF==='ALL' ? true : gF==='TRADEABLE' ? (g==='A+'||g==='A') : g===gF;
   const rxMatch = (st) => rxF==='ALL' ? true
     : rxF==='REVERSAL_ANY' ? (st==='BULLISH_REVERSAL_ZONE'||st==='BEARISH_REVERSAL_ZONE')
     : rxF==='ACTIONABLE_NOW' ? ['BOUNCE_ZONE','BULLISH_REVERSAL_ZONE','BEARISH_REVERSAL_ZONE','PULLBACK_DUE'].includes(st)
@@ -691,7 +948,8 @@ function renderAll(){
       fullList.push({ symbol:sym, price:tk.price, chg:tk.chg, vol:tk.vol, biases:{}, long_tech:0, short_tech:0, long_opp:0, short_opp:0, status:'SCANNING', early:false, reaction_state:'SCANNING', reaction:null });
     }
   }
-  let rows = fullList.filter(r => (!q || r.symbol.includes(q)) && (!eo || r.early) && rxMatch(r.reaction_state||'MID_RANGE_WAIT'));
+  let rows = fullList.filter(r => (!q || r.symbol.includes(q)) && (!eo || r.early)
+    && rxMatch(r.reaction_state||'MID_RANGE_WAIT') && pbMatch(r.playbook_grade||'NO-TRADE'));
   rows.sort((a,b)=> sort==='long_tech'?(b.long_tech-a.long_tech || b.vol-a.vol) : sort==='short_tech'?(b.short_tech-a.short_tech || b.vol-a.vol) : sort==='vol'?b.vol-a.vol : (Math.max(b.long_opp,b.short_opp)-Math.max(a.long_opp,a.short_opp) || b.vol-a.vol));
   document.getElementById('scanBody').innerHTML = rows.map(r=>`
     <tr class="click" onclick="openCoin('${r.symbol}')">
@@ -707,6 +965,7 @@ function renderAll(){
       <td>${scoreHtml(r.long_opp,true)}</td><td>${scoreHtml(r.short_opp,false)}</td>
       <td>${badgeHtml(r.status,r.early)}</td>
       <td>${rxBadgeHtml(r.reaction)}</td>
+      <td>${pbBadgeHtml(r.playbook)}</td>
     </tr>`).join('');
 
   // Top Opps (strictly separated by active side so SHORT CONFIRMED never shows a LONG plan)
@@ -722,7 +981,7 @@ function renderAll(){
   }).join('');
 }
 
-document.addEventListener('change', e => { if(e.target && (e.target.id==='qReaction'||e.target.id==='qEarly')) renderAll(); });
+document.addEventListener('change', e => { if(e.target && ['qReaction','qEarly','qGrade'].includes(e.target.id)) renderAll(); });
 window.toggleW = sym => { state.watch.has(sym)?state.watch.delete(sym):state.watch.add(sym); localStorage.setItem('bn_watch',JSON.stringify([...state.watch])); renderAll(); };
 window.openCoin = (sym, side=null) => {
   const clean = (sym||'').trim().toUpperCase();
@@ -851,6 +1110,48 @@ async function loadCoinChart(){
     : (stName.includes('WATCH') || sum?.early)
     ? `<b>${sym}</b> is on <b>EARLY / ${stName}</b> at <b>${fmtP(d.cur)}</b> — approaching a key Order Block or volume expansion zone before a conventional breakout.`
     : `<b>${sym}</b> currently shows <b>NO ACTIONABLE SETUP</b> at <b>${fmtP(d.cur)}</b> (Long Tech: ${sum?.long_tech??0}/100 vs Short Tech: ${sum?.short_tech??0}/100) — stand aside until price reaches a clean structural zone.`;
+  // ---------- Institutional Setup Playbook ----------
+  const pbView = playbookEngine(d, (sum ? sum.biases : {}), state.lastSenti || null);
+  const pbPanel = document.getElementById('pbPanel');
+  const gateHtml = (g)=>`<div style="display:flex;gap:7px;font-size:12px;line-height:1.45">
+      <span style="font-weight:800;color:${g.passed?'#34d399':'#f87171'}">${g.passed?'✓':'✕'}</span>
+      <div><div style="font-weight:600;color:#e2e8f0">${g.label}</div><div class="muted">${g.detail}</div></div></div>`;
+  const sideBlockHtml = (sd)=>{
+    const x = pbView.sides[sd]; if(!x) return '';
+    const col = sd==='LONG' ? '#10b981' : '#f43f5e';
+    return `<div style="border:1px solid ${col}55;border-radius:8px;padding:9px 11px;background:rgba(15,23,42,.55)">
+      <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:7px">
+        <b style="color:${col}">${sd}</b>${pbBadgeHtml(x)}
+        <span class="muted" style="font-size:11.5px">${x.gates_passed}/${x.gates_total} gates · ${x.setup_type}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:7px">${x.gates.map(gateHtml).join('')}</div>
+      ${x.entry?`<div class="mono" style="font-size:11.5px;display:flex;flex-wrap:wrap;gap:7px;margin-bottom:6px">
+        <span>Entry ${fmtP(x.entry)}</span><span>Stop ${fmtP(x.stop)} (${x.risk_atr} ATR)</span>
+        ${x.targets.slice(0,3).map((t,i)=>`<span>T${i+1} ${fmtP(t)}</span>`).join('')}
+        <span style="color:#38bdf8">R:R ${x.rr1}R / ${x.rr2}R</span></div>`:''}
+      ${x.blockers.length?`<div style="font-size:11.5px;color:#fca5a5;display:flex;flex-direction:column;gap:2px">
+        ${x.blockers.map(b=>`<span>✕ ${b}</span>`).join('')}</div>`:''}
+    </div>`;
+  };
+  if(pbPanel){
+    pbPanel.style.display='block';
+    const col = {'A+':'#10b981',A:'#38bdf8',B:'#f59e0b',C:'#94a3b8','NO-TRADE':'#64748b'}[pbView.grade]||'#64748b';
+    pbPanel.innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+        <div>
+          <div style="font-size:10.5px;font-weight:800;letter-spacing:.06em;color:#38bdf8">INSTITUTIONAL SETUP PLAYBOOK</div>
+          <div style="font-size:13.5px;font-weight:700;color:#f8fafc">${pbBadgeHtml(pbView)} <span style="color:${col}">${pbView.label}</span></div>
+        </div>
+        <span class="muted" style="font-size:11.5px">A+ checklist · closed candles only · no predictions</span>
+      </div>
+      <div style="font-size:12.7px;line-height:1.55;color:#e2e8f0;margin-bottom:9px">${pbView.summary}</div>
+      <div style="padding:9px 11px;border-radius:7px;background:rgba(56,189,248,.06);border:1px solid rgba(56,189,248,.22);font-size:12.3px;line-height:1.55;margin-bottom:9px">
+        <b>Action:</b> ${pbView.action}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:9px">${sideBlockHtml('LONG')}${sideBlockHtml('SHORT')}</div>
+      <div class="muted" style="font-size:11.5px;margin-top:8px">A/A+ requires every gate to pass plus a ≥75/100 confluence score. This grade never upgrades a CONFIRMED signal and never replaces candle-close confirmation.</div>`;
+  }
+
   // ---------- Pre-Indicator Price-Action Reaction Radar ----------
   const rx = reactionEngine(d, sum ? sum.biases : {}, state.lastSenti || null);
   const rxPanel = document.getElementById('rxRadarPanel');

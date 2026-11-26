@@ -22,11 +22,16 @@ interface BacktestReport {
   by_side: Record<string, SubMetric>;
   by_timeframe: Record<string, SubMetric>;
   by_score: Record<string, SubMetric>;
+  by_grade?: Record<string, SubMetric>;
+  t1_hit_rate?: number;
+  grade_counts?: Record<string, number>;
+  mode?: string;
   trades: {
     symbol: string;
     tf: string;
     side: string;
-    status: string;
+    status?: string;
+    grade?: string;
     score: number;
     entry_time: number;
     entry: number;
@@ -47,9 +52,13 @@ export const BacktestingPage: React.FC = () => {
   const [allowDev, setAllowDev] = useState(true);
   const [running, setRunning] = useState(false);
   const [rep, setRep] = useState<BacktestReport | null>(null);
+  const [mode, setMode] = useState<'signal' | 'playbook'>('playbook');
+  const [grades, setGrades] = useState<string[]>(['A+', 'A']);
 
   const toggleTf = (t: string) =>
     setSelectedTfs((cur) => (cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]));
+  const toggleGrade = (g: string) =>
+    setGrades((cur) => (cur.includes(g) ? cur.filter((x) => x !== g) : [...cur, g]));
 
   const run = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,24 +66,20 @@ export const BacktestingPage: React.FC = () => {
     try {
       const syms = symbolsText.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
       const tfs = selectedTfs.length ? selectedTfs : ['1h'];
-      let r = await apiSend<BacktestReport>('/api/backtest', 'POST', {
+      const url = mode === 'playbook' ? '/api/backtest/playbook' : '/api/backtest';
+      const body: Record<string, unknown> = {
         symbols: syms,
         timeframes: tfs,
         min_tech_score: minScore,
         allow_developing: allowDev,
         fee_pct: feePct,
         slippage_pct: slipPct,
-      });
+      };
+      if (mode === 'playbook') body.grades = grades.length ? grades : ['A+', 'A'];
+      let r = await apiSend<BacktestReport>(url, 'POST', body);
       if (r.total_trades === 0 && r.note && r.note.includes('queued for live Binance sync')) {
         await Promise.all(syms.slice(0, 5).map((s) => binanceBridge.syncSingleSymbolNow(s)));
-        r = await apiSend<BacktestReport>('/api/backtest', 'POST', {
-          symbols: syms,
-          timeframes: tfs,
-          min_tech_score: minScore,
-          allow_developing: allowDev,
-          fee_pct: feePct,
-          slippage_pct: slipPct,
-        });
+        r = await apiSend<BacktestReport>(url, 'POST', body);
       }
       setRep(r);
     } finally {
@@ -88,12 +93,36 @@ export const BacktestingPage: React.FC = () => {
         <div>
           <h1>Causal Walk-Forward Backtesting</h1>
           <p className="muted">
-            Zero look-ahead bias • Bar-by-bar closed-candle simulation • Next-bar open fills with adverse slippage & fees
+            Zero look-ahead bias • Closed-candle only • Costs included on both sides • Playbook mode arms the POI and only
+            grades at the moment price actually trades into it
           </p>
         </div>
       </div>
 
       <form onSubmit={run} className="panel form-grid">
+        <label>
+          <span>Strategy</span>
+          <div className="tf-bar">
+            <button type="button" className={`tf-btn ${mode === 'playbook' ? 'active' : ''}`} onClick={() => setMode('playbook')}>
+              Institutional Playbook
+            </button>
+            <button type="button" className={`tf-btn ${mode === 'signal' ? 'active' : ''}`} onClick={() => setMode('signal')}>
+              Signal States
+            </button>
+          </div>
+        </label>
+        {mode === 'playbook' && (
+          <label>
+            <span>Grades to trade</span>
+            <div className="tf-bar">
+              {['A+', 'A', 'B', 'C'].map((g) => (
+                <button type="button" key={g} className={`tf-btn ${grades.includes(g) ? 'active' : ''}`} onClick={() => toggleGrade(g)}>
+                  {g}
+                </button>
+              ))}
+            </div>
+          </label>
+        )}
         <label>
           <span>Symbols (comma-separated)</span>
           <input className="input" value={symbolsText} onChange={(e) => setSymbolsText(e.target.value)} />
@@ -141,6 +170,9 @@ export const BacktestingPage: React.FC = () => {
             <div className="kpi-card"><span className="kpi-label">Average R Multiple</span><span className={`kpi-val ${rep.avg_r >= 0 ? 'bull-txt' : 'bear-txt'}`}>{rep.avg_r}R</span></div>
             <div className="kpi-card"><span className="kpi-label">Net Cumulative R</span><span className={`kpi-val ${rep.total_r >= 0 ? 'bull-txt' : 'bear-txt'}`}>{rep.total_r}R</span></div>
             <div className="kpi-card"><span className="kpi-label">Max Drawdown</span><span className="kpi-val bear-txt">-{rep.max_drawdown_r}R</span></div>
+            {rep.t1_hit_rate !== undefined && (
+              <div className="kpi-card"><span className="kpi-label">T1 Hit Rate</span><span className="kpi-val">{rep.t1_hit_rate}%</span></div>
+            )}
           </div>
 
           <div className="three-col">
@@ -153,8 +185,8 @@ export const BacktestingPage: React.FC = () => {
               <BreakdownTable map={rep.by_timeframe} />
             </div>
             <div className="panel">
-              <h3>By Signal Score Tier</h3>
-              <BreakdownTable map={rep.by_score} />
+              <h3>{rep.by_grade ? 'By Playbook Grade' : 'By Signal Score Tier'}</h3>
+              <BreakdownTable map={rep.by_grade ?? rep.by_score} />
             </div>
           </div>
 
@@ -165,7 +197,7 @@ export const BacktestingPage: React.FC = () => {
                 <table className="data-table compact">
                   <thead>
                     <tr>
-                      <th>Time</th><th>Symbol</th><th>TF</th><th>Side</th><th>Score</th>
+                      <th>Time</th><th>Symbol</th><th>TF</th><th>Grade</th><th>Side</th><th>Score</th>
                       <th>Entry</th><th>SL</th><th>TP1</th><th>Exit</th><th>Net R</th>
                     </tr>
                   </thead>
@@ -175,6 +207,7 @@ export const BacktestingPage: React.FC = () => {
                         <td className="mono small muted">{new Date(t.entry_time).toLocaleString()}</td>
                         <td className="sym">{t.symbol}</td>
                         <td>{t.tf}</td>
+                        <td>{t.grade ?? '—'}</td>
                         <td className={t.side === 'LONG' ? 'bull-txt' : 'bear-txt'}>{t.side}</td>
                         <td className="mono">{t.score}</td>
                         <td className="mono">{fmtPrice(t.entry)}</td>

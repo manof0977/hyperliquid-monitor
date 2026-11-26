@@ -9,6 +9,9 @@ from app.config import settings, TIMEFRAMES, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_I
 from app.db import get_watchlist, list_alerts, load_candles_df, save_kv, toggle_watchlist
 from app.alerts.telegram import send_telegram_raw
 from app.backtest.engine import run_backtest, summarize_trades
+from app.backtest.playbook_backtest import run_playbook_backtest, summarize as summarize_playbook_trades
+from app.analysis.pipeline import analyze_timeframe
+from app.analysis.playbook import evaluate_playbook
 
 router = APIRouter(prefix="/api")
 
@@ -16,6 +19,17 @@ router = APIRouter(prefix="/api")
 def get_engine():
     from app.main import engine
     return engine
+
+
+class BacktestReq(BaseModel):
+    symbols: list[str] = ["BTCUSDT"]
+    timeframes: list[str] = ["1h"]
+    min_tech_score: float = 60.0
+    allow_developing: bool = True
+    fee_pct: float | None = None
+    slippage_pct: float | None = None
+    grades: list[str] | None = None
+
 
 
 @router.get("/status")
@@ -93,11 +107,33 @@ async def api_bridge_sentiment(body: BridgeSentimentBody):
     return {"ok": True}
 
 
+def _compact_playbook(row: dict) -> dict:
+    """Trim the heavy playbook payload for list endpoints (full detail lives in /api/playbook/{symbol})."""
+    pb = row.get("playbook") or {}
+    best = pb.get("best") or {}
+    return {
+        "grade": pb.get("grade", row.get("playbook_grade", "NO-TRADE")),
+        "label": pb.get("label", row.get("playbook_label", "NO TRADE")),
+        "score": pb.get("score", row.get("playbook_score", 0.0)),
+        "side": pb.get("side", row.get("playbook_side", "NONE")),
+        "summary": pb.get("summary", row.get("playbook_summary", "")),
+        "gates_passed": best.get("gates_passed", 0),
+        "gates_total": best.get("gates_total", 7),
+        "setup_type": best.get("setup_type"),
+        "entry": pb.get("entry"),
+        "stop": pb.get("stop"),
+        "targets": pb.get("targets", []),
+        "rr1": pb.get("rr1", 0.0),
+        "blockers": (pb.get("blockers") or [])[:2],
+    }
+
+
 @router.get("/scanner")
 async def api_scanner(
     search: str = "",
     status: str = "ALL",
     reaction: str = "ALL",
+    grade: str = "ALL",
     early_only: bool = False,
     min_score: float = 0.0,
     sort_by: str = "long_opp",
@@ -144,10 +180,27 @@ async def api_scanner(
             ]
         else:
             rows = [r for r in rows if r.get("reaction_state") == reaction]
+    if grade and grade != "ALL":
+        if grade == "TRADEABLE":
+            rows = [r for r in rows if r.get("playbook_grade") in ("A+", "A")]
+        elif grade == "WATCH":
+            rows = [r for r in rows if r.get("playbook_grade") == "B"]
+        else:
+            rows = [r for r in rows if r.get("playbook_grade") == grade]
     if early_only:
         rows = [r for r in rows if r.get("early_watch")]
     if min_score > 0:
         rows = [r for r in rows if max(r.get("long_tech_score", 0), r.get("short_tech_score", 0)) >= min_score]
+
+    if sort_by in ("playbook", "playbook_score"):
+        order = {"A+": 5, "A": 4, "B": 3, "C": 2, "NO-TRADE": 1}
+        rows.sort(key=lambda r: (order.get(r.get("playbook_grade", "NO-TRADE"), 0), r.get("playbook_score", 0)), reverse=True)
+        out = []
+        for r in rows:
+            row = dict(r)
+            row["playbook"] = _compact_playbook(row)
+            out.append(row)
+        return {"items": out, "total": len(out), "status": eng.status_snapshot()}
 
     def _status_rank(st: str) -> int:
         if "CONFIRMED" in st:
@@ -172,7 +225,13 @@ async def api_scanner(
         "change": lambda r: r.get("change_24h", 0),
     }
     rows.sort(key=key_map.get(sort_by, key_map["best_opp"]), reverse=True)
-    return {"items": rows, "total": len(rows), "status": eng.status_snapshot()}
+    # copy before trimming: never mutate the engine's cached row (it holds the full playbook)
+    out = []
+    for r in rows:
+        row = dict(r)
+        row["playbook"] = _compact_playbook(row)
+        out.append(row)
+    return {"items": out, "total": len(out), "status": eng.status_snapshot()}
 
 
 @router.get("/opportunities")
@@ -199,12 +258,106 @@ async def api_opportunities():
     shorts.sort(key=lambda r: (r["short_opp_score"] * 0.55 + r["short_tech_score"] * 0.45), reverse=True)
     early = [r for r in all_rows if r.get("early_watch")]
     early.sort(key=lambda r: max(r.get("long_tech_score", 0), r.get("short_tech_score", 0)), reverse=True)
+    def _trim(items):
+        out = []
+        for r in items:
+            row = dict(r)
+            row["playbook"] = _compact_playbook(row)
+            out.append(row)
+        return out
+
+    # Institutional playbook board: only A/A+ qualify as "tradeable now"
+    ranked = [r for r in all_rows if r.get("playbook_grade") in ("A+", "A")]
+    ranked.sort(key=lambda r: (r.get("playbook_score", 0)), reverse=True)
+    watch = [r for r in all_rows if r.get("playbook_grade") == "B"]
+    watch.sort(key=lambda r: r.get("playbook_score", 0), reverse=True)
+
     return {
         "min_qualifying_score": min_th,
-        "longs": longs[:20],
-        "shorts": shorts[:20],
-        "early_watch": early[:20],
+        "longs": _trim(longs[:20]),
+        "shorts": _trim(shorts[:20]),
+        "early_watch": _trim(early[:20]),
+        "playbook_ready": _trim(ranked[:20]),
+        "playbook_watch": _trim(watch[:20]),
     }
+
+
+@router.get("/playbook/{symbol}")
+async def api_playbook(symbol: str, refresh: bool = False):
+    """Full institutional setup playbook for one symbol (grades, gates, factors, entry/stop/targets)."""
+    sym = symbol.upper()
+    eng = get_engine()
+    row = eng.results.get(sym)
+    if row and not refresh and row.get("playbook"):
+        return {"symbol": sym, "cached": True, "playbook": row["playbook"]}
+
+    frames: dict = {}
+    for tf in ("5m", "15m", "1h", "4h", "1d", "1w"):
+        df = eng.candle_cache.get((sym, tf))
+        if df is None:
+            try:
+                df = await load_candles_df(sym, tf, limit=settings.kline_limit)
+            except Exception:
+                df = None
+        if df is not None and len(df) >= 30:
+            frames[tf] = df
+    if not frames:
+        return {"symbol": sym, "cached": False, "playbook": None,
+                "note": "No local candles for this symbol yet — open it in Coin Analysis or run a scan to sync it."}
+
+    def _run():
+        mtf = {}
+        for tf, df in frames.items():
+            res = analyze_timeframe(df)
+            if res:
+                mtf[tf] = res
+        senti = eng.sentiment_cache.get(sym) if getattr(eng, "sentiment_cache", None) else None
+        return evaluate_playbook(mtf, sentiment=senti)
+
+    pb = await asyncio.to_thread(_run)
+    return {"symbol": sym, "cached": False, "playbook": pb}
+
+
+@router.post("/backtest/playbook")
+async def api_backtest_playbook(req: BacktestReq):
+    """Walk-forward, cost-aware backtest of the A/A+ institutional playbook signals."""
+    eng = get_engine()
+    all_trades: list[dict] = []
+    notes: list[str] = []
+    graded: dict[str, int] = {}
+    for sym in req.symbols[:8]:
+        s = sym.upper()
+        for tf in req.timeframes:
+            if tf not in TIMEFRAMES:
+                continue
+            df = eng.candle_cache.get((s, tf))
+            if df is None or len(df) < 160:
+                if eng.client.connected:
+                    try:
+                        rows = await eng.client.fetch_klines(s, tf, limit=500)
+                        from app.db import upsert_candles
+                        await upsert_candles(s, tf, rows)
+                    except Exception as exc:
+                        notes.append(f"{s} {tf}: live fetch unavailable ({exc})")
+                df = await load_candles_df(s, tf, limit=600)
+                if df.empty:
+                    eng.queue_bridge_symbol(s)
+                    notes.append(f"{s} {tf}: queued for live Binance sync — re-run shortly.")
+                    continue
+            rep = await asyncio.to_thread(
+                run_playbook_backtest, s, tf, df,
+                req.grades or ["A+", "A"], req.fee_pct, req.slippage_pct,
+            )
+            if rep.get("note"):
+                notes.append(f"{s} {tf}: {rep['note']}")
+            for g, c in (rep.get("grade_counts") or {}).items():
+                graded[g] = graded.get(g, 0) + int(c)
+            all_trades.extend(rep.get("trades", []))
+
+    summary = summarize_playbook_trades(all_trades, ", ".join(req.symbols[:5]), ",".join(req.timeframes), graded)
+    if notes and summary["total_trades"] == 0:
+        summary["note"] = " | ".join(notes[:4])
+    return summary
 
 
 @router.get("/coin/{symbol}")
@@ -288,15 +441,6 @@ async def api_put_settings(patch: SettingsPatch):
                 setattr(settings.thresholds, k, int(v))
     await save_kv("settings", asdict(settings))
     return await api_get_settings()
-
-
-class BacktestReq(BaseModel):
-    symbols: list[str] = ["BTCUSDT"]
-    timeframes: list[str] = ["1h"]
-    min_tech_score: float = 60.0
-    allow_developing: bool = True
-    fee_pct: float | None = None
-    slippage_pct: float | None = None
 
 
 @router.post("/backtest")

@@ -4,6 +4,7 @@ import { binanceBridge, BridgeState } from './api/binanceBridge';
 import { DashboardPage } from './pages/DashboardPage';
 import { MarketScannerPage } from './pages/MarketScannerPage';
 import { TopOpportunitiesPage } from './pages/TopOpportunitiesPage';
+import { PlaybookPage } from './pages/PlaybookPage';
 import { CoinAnalysisPage } from './pages/CoinAnalysisPage';
 import { AlertsPage, WatchlistPage } from './pages/WatchlistAlertsPages';
 import { BacktestingPage, SettingsPage } from './pages/BacktestSettingsPages';
@@ -12,6 +13,7 @@ type Tab =
   | 'dashboard'
   | 'scanner'
   | 'opportunities'
+  | 'playbook'
   | 'analysis'
   | 'watchlist'
   | 'alerts'
@@ -22,6 +24,7 @@ const NAV: { id: Tab; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'scanner', label: 'Market Scanner' },
   { id: 'opportunities', label: 'Top Opportunities' },
+  { id: 'playbook', label: 'Setups (A+ Playbook)' },
   { id: 'analysis', label: 'Coin Analysis' },
   { id: 'watchlist', label: 'Watchlist' },
   { id: 'alerts', label: 'Alerts' },
@@ -179,6 +182,7 @@ export const App: React.FC = () => {
           <MarketScannerPage onSelectCoin={openCoin} watchlist={watchlist} onToggleWatch={toggleWatch} />
         )}
         {tab === 'opportunities' && <TopOpportunitiesPage onSelectCoin={openCoin} />}
+        {tab === 'playbook' && <PlaybookPage onSelectCoin={openCoin} />}
         {tab === 'analysis' && (
           <CoinAnalysisPage
             symbol={selectedCoin}

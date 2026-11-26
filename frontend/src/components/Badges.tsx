@@ -32,6 +32,18 @@ export const ScoreCell: React.FC<{ value: number; side: 'long' | 'short' }> = ({
   );
 };
 
+export const PlaybookBadge: React.FC<{ grade?: string; score?: number; label?: string }> = ({ grade, score, label }) => {
+  const g = grade || 'NO-TRADE';
+  const cls =
+    g === 'A+' ? 'badge grade-aplus' : g === 'A' ? 'badge grade-a' : g === 'B' ? 'badge grade-b' : g === 'C' ? 'badge grade-c' : 'badge grade-none';
+  return (
+    <span className={cls} title={label || g}>
+      {g}
+      {score !== undefined && <em style={{ fontStyle: 'normal', opacity: 0.75 }}> {score.toFixed(0)}</em>}
+    </span>
+  );
+};
+
 export const ReactionBadge: React.FC<{ state?: string; label?: string; title?: string }> = ({ state, label, title }) => {
   const st = state || 'MID_RANGE_WAIT';
   const txt = label || (st === 'MID_RANGE_WAIT' ? 'MID-RANGE' : st);

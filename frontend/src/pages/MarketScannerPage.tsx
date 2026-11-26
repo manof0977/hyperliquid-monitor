@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { apiGet, fmtPrice, fmtVol, ScanRow } from '../api/client';
-import { BiasPill, ReactionBadge, ScoreCell, StatusBadge } from '../components/Badges';
+import { BiasPill, PlaybookBadge, ReactionBadge, ScoreCell, StatusBadge } from '../components/Badges';
 
 interface Props {
   onSelectCoin: (sym: string, side?: 'LONG' | 'SHORT') => void;
@@ -17,6 +17,15 @@ const REACTIONS: { value: string; label: string }[] = [
   { value: 'BULLISH_REVERSAL_ZONE', label: 'Bottom Reversal Zones' },
   { value: 'BEARISH_REVERSAL_ZONE', label: 'Top Reversal Zones' },
   { value: 'MID_RANGE_WAIT', label: 'Mid-Range Wait (no edge)' },
+];
+
+const GRADES = [
+  { value: 'ALL', label: 'All Setup Grades' },
+  { value: 'TRADEABLE', label: 'Tradeable only (A+ / A)' },
+  { value: 'A+', label: 'A+ only' },
+  { value: 'A', label: 'A only' },
+  { value: 'B', label: 'B — watchlist' },
+  { value: 'C', label: 'C — do not trade' },
 ];
 
 const STATUSES = [
@@ -36,6 +45,7 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [reactionFilter, setReactionFilter] = useState('ALL');
+  const [gradeFilter, setGradeFilter] = useState('ALL');
   const [sortBy, setSortBy] = useState('best_opp');
   const [minScore, setMinScore] = useState(0);
   const [earlyOnly, setEarlyOnly] = useState(false);
@@ -47,6 +57,7 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
         search,
         status: statusFilter,
         reaction: reactionFilter,
+        grade: gradeFilter,
         sort_by: sortBy,
         min_score: String(minScore),
         early_only: String(earlyOnly),
@@ -62,7 +73,7 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
     load();
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
-  }, [search, statusFilter, reactionFilter, sortBy, minScore, earlyOnly]);
+  }, [search, statusFilter, reactionFilter, gradeFilter, sortBy, minScore, earlyOnly]);
 
   return (
     <div className="page">
@@ -90,7 +101,13 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
             <option key={r.value} value={r.value}>{r.label}</option>
           ))}
         </select>
+        <select className="input" value={gradeFilter} onChange={(e) => setGradeFilter(e.target.value)}>
+          {GRADES.map((g) => (
+            <option key={g.value} value={g.value}>{g.label}</option>
+          ))}
+        </select>
         <select className="input" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+          <option value="playbook">Sort: Playbook Grade (A+ first)</option>
           <option value="best_opp">Sort: Highest Opportunity Score</option>
           <option value="long_tech">Sort: Highest Long Technical</option>
           <option value="short_tech">Sort: Highest Short Technical</option>
@@ -130,12 +147,13 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
               <th className="clickable" onClick={() => setSortBy('short_opp')}>Short Opp ▾</th>
               <th>Signal Status</th>
               <th>Pre-Indicator Reaction</th>
+              <th>Setup Grade</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={17} className="empty">
+                <td colSpan={18} className="empty">
                   {loading ? 'Loading live contracts…' : 'No symbols match current filters (or awaiting Binance connection).'}
                 </td>
               </tr>
@@ -183,6 +201,13 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
                         state={r.reaction_state}
                         label={r.reaction_label}
                         title={r.reaction_summary || 'Pre-indicator price-action reaction state'}
+                      />
+                    </td>
+                    <td>
+                      <PlaybookBadge
+                        grade={r.playbook?.grade}
+                        score={r.playbook?.score}
+                        label={r.playbook?.summary || 'Institutional playbook grade'}
                       />
                     </td>
                   </tr>
