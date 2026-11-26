@@ -186,3 +186,65 @@ def test_build_chart_payload_switches_coins_and_timeframes():
 
     asyncio.run(_run())
 
+
+def test_concurrent_coin_switching_and_bridge_ingest_no_sqlite_lock(tmp_path, monkeypatch):
+    import asyncio
+    from app import db as db_mod
+    from app.scanner.engine import ScannerEngine
+
+    monkeypatch.setattr(db_mod, "DB_PATH", str(tmp_path / "test_scanner.db"))
+
+    def _raw_klines(base_price: float, n: int = 120):
+        rows = []
+        t0 = 1_700_000_000_000
+        p = base_price
+        for i in range(n):
+            ot = t0 + i * 3_600_000
+            p = p * (1.0 + (0.002 if i % 3 else -0.0015))
+            rows.append([ot, p * 0.998, p * 1.004, p * 0.995, p, 1250.0 + i, ot + 3_599_999])
+        # Append a duplicate timestamp update bar to ensure deduplication works cleanly
+        rows.append(rows[-1][:])
+        return rows
+
+    coins = {
+        "MEGAUSDT": 0.04125,
+        "BTCUSDT": 91500.0,
+        "ETHUSDT": 3120.5,
+        "SOLUSDT": 182.4,
+        "XRPUSDT": 1.4825,
+        "DOGEUSDT": 0.21456,
+    }
+
+    async def _run():
+        await db_mod.init_db()
+        eng = ScannerEngine()
+        await eng.ingest_bridge_bootstrap(
+            [{"symbol": s, "baseAsset": s.replace("USDT", ""), "pricePrecision": 5, "tickSize": 0.00001} for s in coins],
+            [{"symbol": s, "price": bp, "change_24h": 2.5, "volume_24h": 50_000_000} for s, bp in coins.items()],
+        )
+
+        # Concurrently ingest all 6 coins while simultaneously switching chart payloads across coins & timeframes
+        ingest_tasks = [
+            eng.ingest_bridge_klines(sym, {tf: _raw_klines(bp) for tf in ("15m", "1h", "4h", "1d")})
+            for sym, bp in coins.items()
+        ]
+        await asyncio.gather(*ingest_tasks)
+
+        chart_payloads = await asyncio.gather(
+            *(eng.build_chart_payload(sym, tf) for sym in coins for tf in ("15m", "1h", "4h", "1d"))
+        )
+        seen_closes = {}
+        for payload in chart_payloads:
+            sym = payload["symbol"]
+            assert len(payload["candles"]) == 120
+            times = [c["time"] for c in payload["candles"]]
+            assert times == sorted(set(times)), f"Duplicate or unsorted candle timestamps for {sym}"
+            if payload["tf"] == "1h":
+                seen_closes[sym] = payload["candles"][-1]["close"]
+
+        # Every coin must return its own distinct price series (never stale candles from a previous coin)
+        assert len(set(round(v, 6) for v in seen_closes.values())) == len(coins)
+
+    asyncio.run(_run())
+
+

@@ -63,7 +63,8 @@ if DIST_DIR:
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
+        no_cache = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
         candidate = os.path.join(DIST_DIR, full_path)
         if full_path and os.path.isfile(candidate):
-            return FileResponse(candidate)
-        return FileResponse(os.path.join(DIST_DIR, "index.html"))
+            return FileResponse(candidate, headers=no_cache)
+        return FileResponse(os.path.join(DIST_DIR, "index.html"), headers=no_cache)

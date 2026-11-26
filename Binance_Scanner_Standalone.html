@@ -148,8 +148,12 @@
     <!-- COIN ANALYSIS -->
     <section id="tab-coin" class="hide">
       <div class="toprow">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="btn" id="prevCoinBtn" title="Previous Coin" style="padding:5px 9px">◀</button>
           <select id="coinSel" style="font-weight:700;font-size:15px"></select>
+          <button class="btn" id="nextCoinBtn" title="Next Coin" style="padding:5px 9px">▶</button>
+          <input class="input" id="coinJump" list="coinJumpList" placeholder="Jump coin (ETH, SOL)…" style="width:165px" />
+          <datalist id="coinJumpList"></datalist>
           <span id="coinPrice" class="mono" style="font-size:20px;font-weight:800">—</span>
           <span id="coinStatus"></span>
         </div>
@@ -198,10 +202,45 @@ const ENDPOINTS = [
 ];
 let EP = ENDPOINTS[0];
 const state = {
-  contracts: [], tickers: new Map(), results: new Map(),
+  contracts: [], tickers: new Map(), results: new Map(), klineCache: new Map(),
   watch: new Set(JSON.parse(localStorage.getItem('bn_watch') || '["BTCUSDT","ETHUSDT","SOLUSDT"]')),
-  selectedCoin: 'BTCUSDT', selectedTf: '1h', scanning: false
+  selectedCoin: 'BTCUSDT', selectedTf: '1h', scanning: false, activeTab: 'dashboard'
 };
+let priorityInFlight = 0, fapiCooldownUntil = 0, pointerFreezeUntil = 0, lastWsRenderTs = 0, loadSeq = 0;
+document.addEventListener('pointerdown', () => { pointerFreezeUntil = Date.now() + 950; }, true);
+
+async function fetchKlinesSmart(sym, tf, lim, isPriority=false){
+  const key = `${sym}:${tf}`;
+  const cached = state.klineCache.get(key);
+  if(cached && (Date.now() - cached.ts) < (isPriority ? 20000 : 60000) && cached.kl.length >= Math.min(lim, 60)) return cached.kl;
+  const bases = [];
+  const cooled = Date.now() < fapiCooldownUntil;
+  if(EP && (!cooled || !EP.fut)) bases.push(EP.rest);
+  if(isPriority || cooled){
+    for(const b of ['https://fapi.binance.com/fapi/v1','https://data-api.binance.vision/api/v3','https://api.binance.com/api/v3','https://api1.binance.com/api/v3']){
+      if(!bases.includes(b)) bases.push(b);
+    }
+  } else if(!bases.length){
+    bases.push('https://fapi.binance.com/fapi/v1','https://data-api.binance.vision/api/v3');
+  }
+  for(const base of bases){
+    const isFapi = base.includes('/fapi/');
+    if(isFapi && Date.now() < fapiCooldownUntil && bases.length > 1 && base !== bases[bases.length-1]) continue;
+    try{
+      const r = await fetch(`${base}/klines?symbol=${encodeURIComponent(sym)}&interval=${tf}&limit=${lim}`);
+      const wh = r.headers.get('x-mbx-used-weight-1m');
+      if(isFapi && wh && parseInt(wh,10) >= 1750) fapiCooldownUntil = Math.max(fapiCooldownUntil, Date.now() + 12000);
+      if(r.status === 429 || r.status === 418){ if(isFapi) fapiCooldownUntil = Date.now() + 25000; continue; }
+      if(!r.ok) continue;
+      const kl = await r.json();
+      if(Array.isArray(kl) && kl.length > 0){
+        state.klineCache.set(key, { ts: Date.now(), kl });
+        return kl;
+      }
+    }catch{}
+  }
+  return cached ? cached.kl : null;
+}
 
 const fmtP = p => {
   if(p==null||isNaN(p)) return '—';
@@ -388,22 +427,24 @@ async function scanAll(){
     renderAll();
 
     let idx=0, done=0;
-    const workers = Array.from({length:4}, async ()=>{
+    const workers = Array.from({length:2}, async ()=>{
       while(idx < ranked.length){
+        while(priorityInFlight > 0) await new Promise(r=>setTimeout(r, 150));
         const sym = ranked[idx++];
+        if(!sym) break;
         const mtf = {};
         await Promise.all(['15m','1h','4h','1d'].map(async tf=>{
           try{
             const lim = tf==='1d' ? 99 : 220;
-            const kl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${tf}&limit=${lim}`).then(r=>r.json());
-            mtf[tf] = analyzeCandles(kl);
+            const kl = await fetchKlinesSmart(sym, tf, lim, false);
+            if(kl) mtf[tf] = analyzeCandles(kl);
           }catch{}
         }));
         const sc = scoreSymbol(sym, mtf);
         done++;
         document.getElementById('rescanBtn').textContent = `Scanning (${done}/${ranked.length})…`;
-        if(sc){ state.results.set(sym, sc); if(done <= 15 || done % 5 === 0) renderAll(); }
-        await new Promise(r=>setTimeout(r, 110));
+        if(sc){ state.results.set(sym, sc); if((done <= 15 || done % 6 === 0) && Date.now() >= pointerFreezeUntil) renderAll(); }
+        await new Promise(r=>setTimeout(r, 480));
       }
     });
     await Promise.all(workers);
@@ -427,14 +468,20 @@ function startWs(){
         const r = state.results.get(it.s);
         if(r){ r.price = +it.c; r.chg = +it.o>0 ? ((+it.c - +it.o)/+it.o*100) : r.chg; }
       }
-      renderAll();
+      if(Date.now() >= pointerFreezeUntil && state.activeTab !== 'coin' && (Date.now() - lastWsRenderTs) > 3500){
+        lastWsRenderTs = Date.now();
+        renderAll();
+      }
     }catch{}
   };
 }
 
 function populateSelect(syms){
+  const sorted = [...new Set([...syms, state.selectedCoin])].sort();
   const sel = document.getElementById('coinSel');
-  sel.innerHTML = syms.map(s=>`<option value="${s}" ${s===state.selectedCoin?'selected':''}>${s}</option>`).join('');
+  sel.innerHTML = sorted.map(s=>`<option value="${s}" ${s===state.selectedCoin?'selected':''}>${s}</option>`).join('');
+  const dl = document.getElementById('coinJumpList');
+  if(dl) dl.innerHTML = sorted.map(s=>`<option value="${s}"></option>`).join('');
 }
 
 function renderAll(){
@@ -504,23 +551,66 @@ function renderAll(){
 }
 
 window.toggleW = sym => { state.watch.has(sym)?state.watch.delete(sym):state.watch.add(sym); localStorage.setItem('bn_watch',JSON.stringify([...state.watch])); renderAll(); };
-window.openCoin = (sym, side=null) => { state.selectedCoin = sym; state.prefSide = side; switchTab('coin'); };
+window.openCoin = (sym, side=null) => {
+  const clean = (sym||'').trim().toUpperCase();
+  if(!clean) return;
+  state.selectedCoin = clean;
+  state.prefSide = side;
+  const sel = document.getElementById('coinSel');
+  if(sel && ![...sel.options].some(o=>o.value===clean)){
+    populateSelect([...state.contracts, clean]);
+  }
+  switchTab('coin');
+};
 
 let chartObj = null;
 async function loadCoinChart(){
+  const mySeq = ++loadSeq;
   const sym = state.selectedCoin, tf = state.selectedTf;
-  document.getElementById('coinSel').value = sym;
-  const kl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${tf}&limit=260`).then(r=>r.json());
-  const d = analyzeCandles(kl); if(!d) return;
+  const sel = document.getElementById('coinSel');
+  if(sel){
+    if(![...sel.options].some(o=>o.value===sym)) populateSelect([...state.contracts, sym]);
+    sel.value = sym;
+  }
+  // Clear previous coin chart immediately so stale candles from another coin never linger
+  if(chartObj){ try{ chartObj.remove(); }catch{} chartObj = null; }
+  if(window._gridCharts){ window._gridCharts.forEach(c=>{ try{c.remove();}catch{} }); window._gridCharts=[]; }
+  const ovCvs = document.getElementById('overlayCanvas');
+  if(ovCvs){ const c2 = ovCvs.getContext('2d'); if(c2) c2.clearRect(0, 0, ovCvs.width, ovCvs.height); }
+  document.getElementById('coinPrice').textContent = 'Loading…';
+
+  priorityInFlight++;
+  let kl = null;
+  try{
+    kl = await fetchKlinesSmart(sym, tf, tf==='1d'||tf==='1w'?99:260, true);
+  } finally {
+    priorityInFlight = Math.max(0, priorityInFlight - 1);
+  }
+  if(mySeq !== loadSeq) return;
+  const d = analyzeCandles(kl);
+  if(!d){
+    document.getElementById('coinPrice').textContent = 'Unavailable';
+    document.getElementById('plainEnglishBody').innerHTML = `<div class="muted">Could not load klines for <b>${sym}</b> (${tf.toUpperCase()}). Click Rescan or select another symbol.</div>`;
+    return;
+  }
   let sum = state.results.get(sym);
   if(!sum){
-    const mtfNow = {};
-    await Promise.all(['15m','1h','4h','1d'].map(async k=>{
-      try{ mtfNow[k] = analyzeCandles(await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${k}&limit=${k==='1d'?99:220}`).then(r=>r.json())); }catch{}
-    }));
-    sum = scoreSymbol(sym, mtfNow);
-    if(sum) state.results.set(sym, sum);
+    priorityInFlight++;
+    try{
+      const mtfNow = {};
+      await Promise.all(['15m','1h','4h','1d'].map(async k=>{
+        try{
+          const kkl = await fetchKlinesSmart(sym, k, k==='1d'?99:220, true);
+          if(kkl) mtfNow[k] = analyzeCandles(kkl);
+        }catch{}
+      }));
+      sum = scoreSymbol(sym, mtfNow);
+      if(sum) state.results.set(sym, sum);
+    } finally {
+      priorityInFlight = Math.max(0, priorityInFlight - 1);
+    }
   }
+  if(mySeq !== loadSeq) return;
   document.getElementById('coinPrice').textContent = fmtP(d.cur);
   document.getElementById('coinStatus').innerHTML = sum ? badgeHtml(sum.status, sum.early) : '';
   document.getElementById('coinBiases').innerHTML = ['1d','4h','1h','15m'].map(k=>`<div style="background:var(--panel2);padding:7px;border-radius:6px;display:flex;justify-content:space-between"><span class="muted">${k.toUpperCase()}</span><span class="pill ${sum?.biases[k]||'NEUTRAL'}">${(sum?.biases[k]||'NEUT').slice(0,4)}</span></div>`).join('');
@@ -649,31 +739,38 @@ async function loadCoinChart(){
   if(is4x){
     gridEl.innerHTML = ['1d','4h','1h','15m'].map(gtf=>`<div class="panel" style="padding:8px"><div style="display:flex;justify-content:space-between;margin-bottom:5px;font-size:12px"><b class="accent">${gtf.toUpperCase()}</b><span class="pill ${sum?.biases[gtf]||'NEUTRAL'}">${(sum?.biases[gtf]||'NEUT').slice(0,4)}</span></div><div id="gstage-${gtf}" style="height:270px;position:relative"></div></div>`).join('');
     window._gridCharts = [];
-    await Promise.all(['1d','4h','1h','15m'].map(async gtf=>{
-      const gkl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${gtf}&limit=${gtf==='1d'?99:200}`).then(r=>r.json()).catch(()=>null);
-      const gd = analyzeCandles(gkl); const el = document.getElementById('gstage-'+gtf);
-      if(!gd || !el) return;
-      const gpf = chartPriceFmt(gd.cur);
-      const gc = LightweightCharts.createChart(el, { width:el.clientWidth, height:270, layout:{background:{color:'#0b0f17'},textColor:'#94a3b8',fontSize:10}, grid:{vertLines:{color:'rgba(148,163,184,0.04)'},horzLines:{color:'rgba(148,163,184,0.04)'}}, rightPriceScale:{autoScale:true,minimumWidth:64}, timeScale:{timeVisible:true,rightOffset:5} });
-      window._gridCharts.push(gc);
-      const gcs = gc.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444', lastValueVisible:true, priceLineVisible:true, priceFormat:gpf });
-      gcs.setData(gd.t.map((tm,i)=>({ time:Math.floor(tm/1000), open:gd.o[i], high:gd.h[i], low:gd.l[i], close:gd.c[i] })));
-      if(gd.n>20) gc.timeScale().setVisibleLogicalRange({ from:Math.max(0,gd.n-65), to:gd.n+4 });
-      [['ema20','rgba(56,189,248,.7)'],['ema50','rgba(245,158,11,.7)']].forEach(([k,col])=>{
-        const ls = gc.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false, priceFormat:gpf });
-        ls.setData(gd.t.map((tm,i)=>({ time:Math.floor(tm/1000), value:gd[k][i] })));
-      });
-      gcs.setMarkers(buildCleanMarkers(gd, 3, 1));
-      if(pl?.entry) gcs.createPriceLine({ price:pl.entry, color:'#38bdf8', lineWidth:1, title:effSide[0] });
-      if(pl?.inv) gcs.createPriceLine({ price:pl.inv, color:'#ef4444', lineWidth:1, title:'SL' });
-    }));
+    priorityInFlight++;
+    try{
+      await Promise.all(['1d','4h','1h','15m'].map(async gtf=>{
+        const gkl = await fetchKlinesSmart(sym, gtf, gtf==='1d'?99:200, true);
+        if(mySeq !== loadSeq) return;
+        const gd = analyzeCandles(gkl); const el = document.getElementById('gstage-'+gtf);
+        if(!gd || !el) return;
+        const gpf = chartPriceFmt(gd.cur);
+        const gc = LightweightCharts.createChart(el, { width:Math.max(el.clientWidth||0, 260), height:270, layout:{background:{color:'#0b0f17'},textColor:'#94a3b8',fontSize:10}, grid:{vertLines:{color:'rgba(148,163,184,0.04)'},horzLines:{color:'rgba(148,163,184,0.04)'}}, rightPriceScale:{autoScale:true,minimumWidth:64}, timeScale:{timeVisible:true,rightOffset:5} });
+        window._gridCharts.push(gc);
+        const gcs = gc.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444', lastValueVisible:true, priceLineVisible:true, priceFormat:gpf });
+        gcs.setData(gd.t.map((tm,i)=>({ time:Math.floor(tm/1000), open:gd.o[i], high:gd.h[i], low:gd.l[i], close:gd.c[i] })));
+        if(gd.n>20) gc.timeScale().setVisibleLogicalRange({ from:Math.max(0,gd.n-65), to:gd.n+4 });
+        [['ema20','rgba(56,189,248,.7)'],['ema50','rgba(245,158,11,.7)']].forEach(([k,col])=>{
+          const ls = gc.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false, priceFormat:gpf });
+          ls.setData(gd.t.map((tm,i)=>({ time:Math.floor(tm/1000), value:gd[k][i] })));
+        });
+        gcs.setMarkers(buildCleanMarkers(gd, 3, 1));
+        if(pl?.entry) gcs.createPriceLine({ price:pl.entry, color:'#38bdf8', lineWidth:1, title:effSide[0] });
+        if(pl?.inv) gcs.createPriceLine({ price:pl.inv, color:'#ef4444', lineWidth:1, title:'SL' });
+      }));
+    } finally {
+      priorityInFlight = Math.max(0, priorityInFlight - 1);
+    }
     return;
   }
 
+  if(mySeq !== loadSeq) return;
   const stage = document.getElementById('chartStage');
   const pf = chartPriceFmt(d.cur);
   const chart = LightweightCharts.createChart(stage, {
-    width: stage.clientWidth, height: 500,
+    width: Math.max(stage.clientWidth||0, 320), height: 500,
     layout:{ background:{ color:'#0b0f17' }, textColor:'#94a3b8' },
     grid:{ vertLines:{ color:'rgba(148,163,184,0.05)' }, horzLines:{ color:'rgba(148,163,184,0.05)' } },
     rightPriceScale:{ autoScale:true, minimumWidth:76 },
@@ -717,9 +814,10 @@ async function loadCoinChart(){
 }
 
 function switchTab(id){
+  state.activeTab = id;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active', b.dataset.tab===id));
   ['dashboard','scanner','opps','coin','watch'].forEach(t=>document.getElementById('tab-'+t).classList.toggle('hide', t!==id));
-  if(id==='coin') loadCoinChart();
+  if(id==='coin') loadCoinChart(); else renderAll();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 document.querySelectorAll('#layoutBar button').forEach(b=>b.onclick=()=>{
@@ -736,6 +834,35 @@ document.querySelectorAll('#tfBar button').forEach(b=>b.onclick=()=>{
   loadCoinChart();
 });
 document.getElementById('coinSel').onchange = e => { state.selectedCoin = e.target.value; state.prefSide = null; loadCoinChart(); };
+const stepCoin = delta => {
+  const sel = document.getElementById('coinSel');
+  if(!sel || !sel.options.length) return;
+  const idx = Math.max(0, sel.selectedIndex);
+  const next = (idx + delta + sel.options.length) % sel.options.length;
+  state.selectedCoin = sel.options[next].value;
+  state.prefSide = null;
+  loadCoinChart();
+};
+document.getElementById('prevCoinBtn').onclick = () => stepCoin(-1);
+document.getElementById('nextCoinBtn').onclick = () => stepCoin(1);
+const coinJumpEl = document.getElementById('coinJump');
+coinJumpEl.oninput = e => {
+  const up = e.target.value.trim().toUpperCase();
+  const sel = document.getElementById('coinSel');
+  if(sel && [...sel.options].some(o=>o.value===up)){
+    state.selectedCoin = up; state.prefSide = null; e.target.value = ''; loadCoinChart();
+  }
+};
+coinJumpEl.onkeydown = e => {
+  if(e.key !== 'Enter') return;
+  e.preventDefault();
+  const q = e.target.value.trim().toUpperCase();
+  if(!q) return;
+  const opts = [...document.getElementById('coinSel').options].map(o=>o.value);
+  const hit = opts.find(s=>s===q) || opts.find(s=>s===q+'USDT') || opts.find(s=>s.startsWith(q)) || (q.endsWith('USDT')?q:q+'USDT');
+  e.target.value = '';
+  openCoin(hit);
+};
 document.getElementById('rescanBtn').onclick = scanAll;
 ['qSearch','qSort','qEarly'].forEach(id=>document.getElementById(id).oninput=renderAll);
 

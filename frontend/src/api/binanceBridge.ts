@@ -68,6 +68,8 @@ class BrowserBinanceBridge {
   };
   private listeners = new Set<Listener>();
   private forceBurst = false;
+  private priorityInFlight = 0;
+  private fapiCooldownUntil = 0;
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -82,6 +84,78 @@ class BrowserBinanceBridge {
 
   triggerImmediateSync() {
     this.forceBurst = true;
+  }
+
+  /**
+   * Multi-endpoint kline fetcher with automatic rate-limit protection & Vision/Spot mirror fallback.
+   * Ensures explicit user coin switches succeed even if `fapi.binance.com` is temporarily throttled.
+   */
+  async fetchKlinesSmart(
+    symbol: string,
+    tf: string,
+    limit: number,
+    startTime?: number | null,
+    isPriority: boolean = false
+  ): Promise<unknown[][] | null> {
+    const sym = symbol.trim().toUpperCase();
+    const params = new URLSearchParams({
+      symbol: sym,
+      interval: tf,
+      limit: String(limit),
+    });
+    if (startTime) params.set('startTime', String(startTime));
+
+    const bases: string[] = [];
+    const fapiCooledDown = Date.now() < this.fapiCooldownUntil;
+    if (this.spec && (!fapiCooledDown || this.spec.kind !== 'futures')) {
+      bases.push(this.spec.rest);
+    }
+    if (isPriority || fapiCooledDown) {
+      for (const fallback of [
+        'https://fapi.binance.com/fapi/v1',
+        'https://data-api.binance.vision/api/v3',
+        'https://api.binance.com/api/v3',
+        'https://api1.binance.com/api/v3',
+      ]) {
+        if (!bases.includes(fallback)) bases.push(fallback);
+      }
+    } else if (bases.length === 0) {
+      bases.push('https://fapi.binance.com/fapi/v1', 'https://data-api.binance.vision/api/v3');
+    }
+
+    for (const base of bases) {
+      const isFapi = base.includes('/fapi/');
+      if (isFapi && Date.now() < this.fapiCooldownUntil && bases.length > 1 && base !== bases[bases.length - 1]) {
+        continue;
+      }
+      try {
+        const r = await fetch(`${base}/klines?${params.toString()}`);
+        const weightHdr = r.headers.get('x-mbx-used-weight-1m');
+        if (isFapi && weightHdr) {
+          const used = parseInt(weightHdr, 10);
+          if (!Number.isNaN(used) && used >= 1750) {
+            // Pause background fapi workers briefly so user clicks keep priority headroom
+            this.fapiCooldownUntil = Math.max(this.fapiCooldownUntil, Date.now() + 12_000);
+          }
+        }
+        if (r.status === 429 || r.status === 418) {
+          if (isFapi) {
+            this.fapiCooldownUntil = Date.now() + 25_000;
+          }
+          continue;
+        }
+        if (!r.ok) {
+          continue;
+        }
+        const json = await r.json();
+        if (Array.isArray(json) && json.length > 0) {
+          return json;
+        }
+      } catch {
+        // Try next mirror
+      }
+    }
+    return null;
   }
 
   async syncSymbolSentiment(symbol: string, tf: string = '1h'): Promise<boolean> {
@@ -156,39 +230,45 @@ class BrowserBinanceBridge {
     return false;
   }
 
-  async syncSingleSymbolNow(symbol: string): Promise<boolean> {
-    if (!this.spec) {
-      this.spec = await this.pickWorkingEndpoint();
+  async syncSingleSymbolNow(symbol: string, priorityTf?: string): Promise<boolean> {
+    this.priorityInFlight += 1;
+    try {
+      if (!this.spec) {
+        this.spec = await this.pickWorkingEndpoint();
+      }
+      const sym = symbol.trim().toUpperCase();
+      const allTfs = ['5m', '15m', '1h', '4h', '1d', '1w'];
+      // Fetch requested TF first in order so if network is constrained it gets first shot
+      const orderedTfs = priorityTf && allTfs.includes(priorityTf)
+        ? [priorityTf, ...allTfs.filter((t) => t !== priorityTf)]
+        : allTfs;
+
+      const frames: Record<string, unknown[][]> = {};
+      await Promise.all(
+        orderedTfs.map(async (tf) => {
+          const lim = tf === '1d' || tf === '1w' ? 99 : 300;
+          const kl = await this.fetchKlinesSmart(sym, tf, lim, null, true);
+          if (kl && kl.length > 0) {
+            frames[tf] = kl;
+          }
+        })
+      );
+
+      // Fire sentiment in the background so chart rendering never waits on 4 extra ratio requests
+      this.syncSymbolSentiment(sym, priorityTf || '1h').catch(() => {});
+
+      if (Object.keys(frames).length > 0) {
+        await apiSend('/api/bridge/klines', 'POST', {
+          symbol: sym,
+          source: this.spec?.label || 'binance-public',
+          frames,
+        });
+        return true;
+      }
+      return false;
+    } finally {
+      this.priorityInFlight = Math.max(0, this.priorityInFlight - 1);
     }
-    if (!this.spec) return false;
-    const tfs = ['5m', '15m', '1h', '4h', '1d', '1w'];
-    const frames: Record<string, unknown[][]> = {};
-    await Promise.all([
-      ...tfs.map(async (tf) => {
-        const lim = tf === '1d' || tf === '1w' ? 99 : 300;
-        const url = `${this.spec!.rest}/klines?symbol=${encodeURIComponent(symbol)}&interval=${tf}&limit=${lim}`;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const r = await fetch(url);
-            if (r.ok) {
-              frames[tf] = await r.json();
-              break;
-            }
-          } catch {}
-          await new Promise((res) => setTimeout(res, 200));
-        }
-      }),
-      this.syncSymbolSentiment(symbol, '1h'),
-    ]);
-    if (Object.keys(frames).length > 0) {
-      await apiSend('/api/bridge/klines', 'POST', {
-        symbol,
-        source: this.spec.label,
-        frames,
-      });
-      return true;
-    }
-    return false;
   }
 
   start() {
@@ -390,6 +470,7 @@ class BrowserBinanceBridge {
         if (Date.now() - lastBootstrap > 45_000 || plan.top_symbols.length === 0) {
           await this.bootstrapContractsAndTickers(this.spec);
           lastBootstrap = Date.now();
+          this.emit({ syncedSymbols: this.state.syncedSymbols });
           continue; // re-fetch plan now that symbols_meta & volume ranking exist
         }
 
@@ -404,32 +485,25 @@ class BrowserBinanceBridge {
           continue;
         }
 
-        // Process 3 symbols concurrently per batch across ALL Binance USDT perpetual contracts (safe inside rate limits)
+        // Pace background workers at 2 concurrent symbols + 500ms gap (~300–550 weight/min, well under Binance 2400/min limit)
+        // and yield immediately whenever the user switches coins (`priorityInFlight > 0`).
         const ep = this.spec;
-        const workerCount = 3;
+        const workerCount = 2;
         let idx = 0;
         const workers = Array.from({ length: Math.min(workerCount, plan.jobs.length) }, async () => {
           while (idx < plan.jobs.length && !this.stopped) {
+            while (this.priorityInFlight > 0 && !this.stopped) {
+              await new Promise((r) => setTimeout(r, 150));
+            }
             const job = plan.jobs[idx++];
+            if (!job) break;
             this.emit({ currentSymbol: job.symbol, targetSymbols: plan.total_target ?? this.state.targetSymbols });
             const frames: Record<string, unknown[][]> = {};
             await Promise.all(
               job.tfs.map(async (q) => {
-                const params = new URLSearchParams({
-                  symbol: job.symbol,
-                  interval: q.tf,
-                  limit: String(q.limit),
-                });
-                if (q.start_time) params.set('startTime', String(q.start_time));
-                for (let attempt = 0; attempt < 2; attempt++) {
-                  try {
-                    const r = await fetch(`${ep.rest}/klines?${params.toString()}`);
-                    if (r.ok) {
-                      frames[q.tf] = await r.json();
-                      break;
-                    }
-                  } catch {}
-                  await new Promise((res) => setTimeout(res, 180));
+                const kl = await this.fetchKlinesSmart(job.symbol, q.tf, q.limit, q.start_time, false);
+                if (kl && kl.length > 0) {
+                  frames[q.tf] = kl;
                 }
               })
             );
@@ -441,7 +515,7 @@ class BrowserBinanceBridge {
               });
               this.emit({ syncedSymbols: this.state.syncedSymbols + 1 });
             }
-            await new Promise((r) => setTimeout(r, 120));
+            await new Promise((r) => setTimeout(r, 500));
           }
         });
         await Promise.all(workers);

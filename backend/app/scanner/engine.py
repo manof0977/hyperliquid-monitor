@@ -286,16 +286,26 @@ class ScannerEngine:
             tf = "1h"
         df = self.candle_cache.get((symbol, tf))
         if df is None or df.empty:
+            df = await load_candles_df(symbol, tf, limit=320)
+            if not df.empty:
+                self.candle_cache[(symbol, tf)] = df
+        if df is None or df.empty:
             if self.client.connected:
                 try:
-                    frames = await self.ensure_symbol_frames(symbol, sync_network=True)
-                    df = frames.get(tf)
-                except Exception:
+                    target_bars = 99 if tf in ("1d", "1w") else max(settings.kline_limit, 260)
+                    rows = await self.client.fetch_klines(symbol, tf, limit=target_bars, priority=True)
+                    if rows:
+                        df = pd.DataFrame(rows, columns=CANDLE_COLS).drop_duplicates(subset=["open_time"], keep="last").sort_values("open_time").reset_index(drop=True)
+                        self.candle_cache[(symbol, tf)] = df
+                        self._last_tf_sync[(symbol, tf)] = int(time.time() * 1000)
+                        asyncio.create_task(upsert_candles(symbol, tf, rows))
+                        if symbol not in self.results:
+                            asyncio.create_task(self._safe_analyze(symbol))
+                except Exception as exc:
+                    log.debug("Priority chart klines fetch failed for %s %s: %s", symbol, tf, exc)
                     df = await load_candles_df(symbol, tf, limit=320)
             else:
-                df = await load_candles_df(symbol, tf, limit=320)
-                if df.empty:
-                    self.queue_bridge_symbol(symbol)
+                self.queue_bridge_symbol(symbol)
         if df is None or df.empty:
             summary = self.results.get(symbol)
             meta = self.symbols_meta.get(symbol, {})
@@ -325,7 +335,7 @@ class ScannerEngine:
             except Exception:
                 pass
 
-        df_ind = tf_detail["df"] if tf_detail else df
+        df_ind = (tf_detail["df"] if tf_detail else df).drop_duplicates(subset=["open_time"], keep="last").sort_values("open_time")
         candles = [
             {
                 "time": int(r.open_time // 1000),
@@ -368,7 +378,7 @@ class ScannerEngine:
         cached = self.sentiment_cache.get(symbol)
         if self.client.connected and (not cached or (now_ms - cached.get("_ts", 0)) > 180_000):
             try:
-                fresh = await self.client.fetch_symbol_sentiment(symbol, period=tf)
+                fresh = await asyncio.wait_for(self.client.fetch_symbol_sentiment(symbol, period=tf), timeout=2.2)
                 fresh["_ts"] = now_ms
                 self.sentiment_cache[symbol] = fresh
                 cached = fresh
@@ -485,11 +495,26 @@ class ScannerEngine:
                 (int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5]), int(k[6]))
                 for k in raw_rows
             ]
-            await upsert_candles(symbol, tf, rows)
+            # Update in-memory cache immediately so concurrent /api/coin requests serve fresh klines in <1ms
+            inc_df = pd.DataFrame(rows, columns=CANDLE_COLS)
+            prev_df = self.candle_cache.get((symbol, tf))
+            if prev_df is not None and not prev_df.empty:
+                merged = pd.concat([prev_df, inc_df], ignore_index=True)
+            else:
+                merged = inc_df
+            merged = (
+                merged.drop_duplicates(subset=["open_time"], keep="last")
+                .sort_values("open_time")
+                .tail(max(settings.kline_limit, 350))
+                .reset_index(drop=True)
+            )
+            self.candle_cache[(symbol, tf)] = merged
             self._last_tf_sync[(symbol, tf)] = now_ms
-            df = await load_candles_df(symbol, tf, limit=max(settings.kline_limit, 320))
-            if not df.empty:
-                self.candle_cache[(symbol, tf)] = df
+            await upsert_candles(symbol, tf, rows)
+            if len(merged) < 60:
+                db_df = await load_candles_df(symbol, tf, limit=max(settings.kline_limit, 320))
+                if len(db_df) > len(merged):
+                    self.candle_cache[(symbol, tf)] = db_df
         self.last_scan_ts = now_ms
         return await self.analyze_one(symbol, sync_network=False)
 
