@@ -1,134 +1,374 @@
 import React, { useEffect, useState } from 'react';
-import { apiGet, CoinPayload, fmtPrice, fmtVol } from '../api/client';
+import { apiGet, CoinPayload, fmtPrice, fmtVol, TradePlan } from '../api/client';
 import { binanceBridge } from '../api/binanceBridge';
 import { BiasPill, ScoreCell, StatusBadge } from '../components/Badges';
 import { SMCChart } from '../components/SMCChart';
 import { PlainEnglishReport } from '../components/PlainEnglishReport';
 
-const TFS = ['5m', '15m', '1h', '4h', '1d', '1w'];
-
 interface Props {
   symbol: string;
+  preferredSide?: 'LONG' | 'SHORT' | null;
   symbols: string[];
   onChangeSymbol: (s: string) => void;
   watchlist: string[];
   onToggleWatch: (s: string, add: boolean) => void;
 }
 
+const TFS = ['5m', '15m', '1h', '4h', '1d', '1w'];
+const GRID_4_TFS = ['1d', '4h', '1h', '15m'];
+
 export const CoinAnalysisPage: React.FC<Props> = ({
   symbol,
+  preferredSide,
   symbols,
   onChangeSymbol,
   watchlist,
   onToggleWatch,
 }) => {
+  const [layout, setLayout] = useState<'1x' | '2x' | '4x'>('1x');
   const [tf, setTf] = useState('1h');
+  const [splitTfs, setSplitTfs] = useState<[string, string]>(['4h', '15m']);
+  const [detailMode, setDetailMode] = useState<'clean' | 'full'>('clean');
+
   const [data, setData] = useState<CoinPayload | null>(null);
+  const [multiData, setMultiData] = useState<Record<string, CoinPayload>>({});
   const [loading, setLoading] = useState(true);
+
   const [showEMA, setShowEMA] = useState(true);
   const [showOB, setShowOB] = useState(true);
   const [showFVG, setShowFVG] = useState(true);
-  const [showSR, setShowSR] = useState(true);
+  const [showSR, setShowSR] = useState(false); // Default OFF so horizontal lines never clutter Entry/SL/TP
   const [showPlan, setShowPlan] = useState(true);
+  const [manualSide, setManualSide] = useState<'LONG' | 'SHORT' | null>(preferredSide ?? null);
+  const [showRulesHelp, setShowRulesHelp] = useState(false);
 
+  // Sync manualSide whenever symbol or preferredSide changes from Scanner / Opportunities
+  useEffect(() => {
+    setManualSide(preferredSide ?? null);
+  }, [symbol, preferredSide]);
+
+  // Load primary chart + any visible multi-timeframe charts in parallel
   useEffect(() => {
     let alive = true;
     setLoading(true);
+
+    const neededTfs =
+      layout === '4x'
+        ? Array.from(new Set([tf, ...GRID_4_TFS]))
+        : layout === '2x'
+        ? Array.from(new Set([tf, ...splitTfs]))
+        : [tf];
+
     const load = async () => {
       try {
-        let d = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
-        if (alive && d.candles.length === 0) {
+        let first = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
+        if (alive && first.candles.length === 0) {
           const ok = await binanceBridge.syncSingleSymbolNow(symbol);
           if (ok && alive) {
-            d = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
+            first = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
           }
-        } else if (alive && !d.sentiment) {
+        } else if (alive && !first.sentiment) {
           const ok = await binanceBridge.syncSymbolSentiment(symbol, tf);
           if (ok && alive) {
-            d = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
+            first = await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${tf}`);
           }
         }
-        if (alive) setData(d);
+        if (!alive) return;
+        setData(first);
+
+        const extraTfs = neededTfs.filter((k) => k !== tf);
+        if (extraTfs.length > 0) {
+          const results = await Promise.all(
+            extraTfs.map(async (k) => {
+              try {
+                return [k, await apiGet<CoinPayload>(`/api/coin/${encodeURIComponent(symbol)}?tf=${k}`)] as const;
+              } catch {
+                return null;
+              }
+            })
+          );
+          if (!alive) return;
+          const nextMap: Record<string, CoinPayload> = { [tf]: first };
+          for (const item of results) {
+            if (item) nextMap[item[0]] = item[1];
+          }
+          setMultiData(nextMap);
+        } else {
+          setMultiData({ [tf]: first });
+        }
       } finally {
         if (alive) setLoading(false);
       }
     };
+
     load();
     const id = setInterval(load, 8000);
     return () => {
       alive = false;
       clearInterval(id);
     };
-  }, [symbol, tf]);
+  }, [symbol, tf, layout, splitTfs]);
 
   const sum = data?.summary;
   const ov = data?.overlays;
   const starred = watchlist.includes(symbol);
 
+  // Strict side resolution: explicit user selection -> status prefix -> active_side
+  const autoSide: 'LONG' | 'SHORT' = sum?.status?.startsWith('SHORT')
+    ? 'SHORT'
+    : sum?.status?.startsWith('LONG')
+    ? 'LONG'
+    : sum?.active_side === 'SHORT'
+    ? 'SHORT'
+    : 'LONG';
+  const effectiveSide: 'LONG' | 'SHORT' = manualSide ?? autoSide;
+  const displayedPlan: TradePlan | undefined =
+    effectiveSide === 'SHORT' ? sum?.short_plan : sum?.long_plan;
+
+  const planEntryZone = displayedPlan?.entry_zone ?? (sum?.active_side === effectiveSide ? sum?.entry_zone : null);
+  const planEntry = displayedPlan?.entry ?? (sum?.active_side === effectiveSide ? sum?.entry : null);
+  const planInv = displayedPlan?.invalidation ?? (sum?.active_side === effectiveSide ? sum?.invalidation : null);
+  const planTargets = displayedPlan?.targets ?? (sum?.active_side === effectiveSide ? sum?.targets ?? [] : []);
+  const planTargetDetails = displayedPlan?.target_details ?? [];
+  const planRR = displayedPlan?.rr ?? (sum?.active_side === effectiveSide ? sum?.rr : 0);
+  const sideStatus =
+    effectiveSide === 'SHORT'
+      ? sum?.short_status || (sum?.status?.startsWith('SHORT') ? sum.status : 'NO SETUP')
+      : sum?.long_status || (sum?.status?.startsWith('LONG') ? sum.status : 'NO SETUP');
+
   return (
     <div className="page">
-      <div className="coin-topbar">
-        <div className="coin-select-group">
+      <div className="page-header">
+        <div className="coin-title-row">
           <select className="input sym-select" value={symbol} onChange={(e) => onChangeSymbol(e.target.value)}>
             {[symbol, ...symbols.filter((s) => s !== symbol)].map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
-          <button className="btn ghost" onClick={() => onToggleWatch(symbol, !starred)}>
-            {starred ? '★ Watchlisted' : '☆ Watchlist'}
-          </button>
+          <span className="coin-price mono">{fmtPrice(sum?.price ?? data?.candles.slice(-1)[0]?.close)}</span>
           {sum && (
-            <>
-              <span className="big-price mono">{fmtPrice(sum.price)}</span>
-              <span className={sum.change_24h >= 0 ? 'bull-txt mono' : 'bear-txt mono'}>
-                {sum.change_24h >= 0 ? '+' : ''}{sum.change_24h.toFixed(2)}%
-              </span>
-              <StatusBadge status={sum.status} early={sum.early_watch} />
-            </>
+            <span className={sum.change_24h >= 0 ? 'bull-txt mono' : 'bear-txt mono'}>
+              {sum.change_24h >= 0 ? '+' : ''}{sum.change_24h.toFixed(2)}%
+            </span>
           )}
+          {sum && <StatusBadge status={sum.status} early={sum.early_watch} />}
+          <button className="btn ghost" onClick={() => onToggleWatch(symbol, !starred)}>
+            {starred ? '★ In Watchlist' : '☆ Add Watchlist'}
+          </button>
         </div>
 
-        <div className="tf-bar">
-          {TFS.map((t) => (
-            <button key={t} className={`tf-btn ${tf === t ? 'active' : ''}`} onClick={() => setTf(t)}>
-              {t.toUpperCase()}
+        <div className="tf-bar" style={{ flexWrap: 'wrap', gap: 10 }}>
+          {/* Multi-Timeframe Layout Switcher */}
+          <div className="seg-group" title="Switch between 1 Single Chart, 2 Split Charts (HTF+LTF), or 4 Multi-Timeframe Charts">
+            <button className={`tf-btn ${layout === '1x' ? 'active' : ''}`} onClick={() => setLayout('1x')}>
+              1x Chart
             </button>
-          ))}
-        </div>
-      </div>
+            <button className={`tf-btn ${layout === '2x' ? 'active' : ''}`} onClick={() => setLayout('2x')}>
+              2x Split
+            </button>
+            <button className={`tf-btn ${layout === '4x' ? 'active' : ''}`} onClick={() => setLayout('4x')}>
+              4x Multi-TF
+            </button>
+          </div>
 
-      <div className="overlay-toggles">
-        <label><input type="checkbox" checked={showEMA} onChange={(e) => setShowEMA(e.target.checked)} /> EMA 20/50/100/200</label>
-        <label><input type="checkbox" checked={showOB} onChange={(e) => setShowOB(e.target.checked)} /> Order Blocks</label>
-        <label><input type="checkbox" checked={showFVG} onChange={(e) => setShowFVG(e.target.checked)} /> FVG Imbalances</label>
-        <label><input type="checkbox" checked={showSR} onChange={(e) => setShowSR(e.target.checked)} /> Support / Resistance</label>
-        <label><input type="checkbox" checked={showPlan} onChange={(e) => setShowPlan(e.target.checked)} /> Entry / SL / Targets</label>
+          {layout === '1x' && (
+            <div className="seg-group">
+              {TFS.map((k) => (
+                <button key={k} className={`tf-btn ${tf === k ? 'active' : ''}`} onClick={() => setTf(k)}>
+                  {k.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Clean vs Full Label Density Switcher */}
+          <div className="seg-group" title="Clean mode filters out historical box/label clutter so candles stay readable">
+            <button
+              className={`tf-btn ${detailMode === 'clean' ? 'active' : ''}`}
+              onClick={() => setDetailMode('clean')}
+            >
+              Clean View
+            </button>
+            <button
+              className={`tf-btn ${detailMode === 'full' ? 'active' : ''}`}
+              onClick={() => setDetailMode('full')}
+            >
+              Full SMC
+            </button>
+          </div>
+
+          <div className="overlay-toggles">
+            <label><input type="checkbox" checked={showEMA} onChange={(e) => setShowEMA(e.target.checked)} /> EMA</label>
+            <label><input type="checkbox" checked={showOB} onChange={(e) => setShowOB(e.target.checked)} /> OB</label>
+            <label><input type="checkbox" checked={showFVG} onChange={(e) => setShowFVG(e.target.checked)} /> FVG</label>
+            <label><input type="checkbox" checked={showSR} onChange={(e) => setShowSR(e.target.checked)} /> S/R</label>
+            <label><input type="checkbox" checked={showPlan} onChange={(e) => setShowPlan(e.target.checked)} /> Plan</label>
+          </div>
+        </div>
       </div>
 
       <div className="analysis-layout">
-        <div className="chart-col">
-          <div className="chart-panel panel">
-            {loading && !data ? (
-              <div className="empty">Loading {symbol} {tf} candles from Binance…</div>
-            ) : !data || data.candles.length === 0 ? (
-              <div className="empty">
-                No real historical candles stored yet for <strong>{symbol} ({tf})</strong>. Connect to Binance public
-                endpoint <code>fapi.binance.com</code> to populate live OHLCV data.
-              </div>
-            ) : (
-              <SMCChart data={data} showEMA={showEMA} showOB={showOB} showFVG={showFVG} showSR={showSR} showPlan={showPlan} />
-            )}
-          </div>
+        <div className="analysis-main-col">
+          {/* 1x SINGLE CHART */}
+          {layout === '1x' && (
+            <div className="panel chart-panel">
+              {data && data.candles.length > 0 ? (
+                <SMCChart
+                  data={data}
+                  showEMA={showEMA}
+                  showOB={showOB}
+                  showFVG={showFVG}
+                  showSR={showSR}
+                  showPlan={showPlan}
+                  detailMode={detailMode}
+                  planSide={effectiveSide}
+                  height={500}
+                />
+              ) : (
+                <div className="empty" style={{ height: 500, display: 'grid', placeItems: 'center' }}>
+                  {loading ? `Loading ${symbol} ${tf} klines…` : 'No candle data available yet (check Binance connection).'}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 2x SPLIT (HTF Structure + LTF Trigger) */}
+          {layout === '2x' && (
+            <div className="mtf-chart-grid cols-2">
+              {splitTfs.map((paneTf, idx) => {
+                const pData = multiData[paneTf];
+                return (
+                  <div key={`${idx}-${paneTf}`} className={`panel chart-panel ${tf === paneTf ? 'focused-pane' : ''}`}>
+                    <div className="pane-bar">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <select
+                          className="input pane-tf-select"
+                          value={paneTf}
+                          onChange={(e) => {
+                            const next: [string, string] = [...splitTfs] as [string, string];
+                            next[idx] = e.target.value;
+                            setSplitTfs(next);
+                            setTf(e.target.value);
+                          }}
+                        >
+                          {TFS.map((tOpt) => (
+                            <option key={tOpt} value={tOpt}>{tOpt.toUpperCase()}</option>
+                          ))}
+                        </select>
+                        <span className="muted small">{idx === 0 ? 'HTF Structure' : 'LTF Trigger'}</span>
+                        <BiasPill bias={sum?.biases?.[paneTf]} />
+                      </div>
+                      <div className="muted small mono">
+                        {pData?.overlays ? (
+                          <>
+                            Trend: <strong>{pData.overlays.structure.trend.toUpperCase()}</strong> • RSI:{' '}
+                            <strong>{Number(pData.overlays.ind.rsi14 || 0).toFixed(1)}</strong>
+                          </>
+                        ) : null}
+                        <button
+                          className="btn ghost"
+                          style={{ marginLeft: 8, padding: '2px 7px', fontSize: 11 }}
+                          onClick={() => setTf(paneTf)}
+                        >
+                          {tf === paneTf ? '● Report TF' : 'Inspect Report'}
+                        </button>
+                      </div>
+                    </div>
+                    {pData && pData.candles.length > 0 ? (
+                      <SMCChart
+                        data={pData}
+                        showEMA={showEMA}
+                        showOB={showOB}
+                        showFVG={showFVG}
+                        showSR={showSR}
+                        showPlan={showPlan}
+                        detailMode={detailMode}
+                        planSide={effectiveSide}
+                        height={390}
+                      />
+                    ) : (
+                      <div className="empty" style={{ height: 390, display: 'grid', placeItems: 'center' }}>
+                        Loading {paneTf.toUpperCase()}…
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* 4x MULTI-TIMEFRAME GRID (1D • 4H • 1H • 15M) */}
+          {layout === '4x' && (
+            <div className="mtf-chart-grid cols-2">
+              {GRID_4_TFS.map((paneTf) => {
+                const pData = multiData[paneTf];
+                const roleMap: Record<string, string> = {
+                  '1d': 'Macro Bias',
+                  '4h': 'Swing Structure',
+                  '1h': 'Primary Execution',
+                  '15m': 'Entry Trigger',
+                };
+                return (
+                  <div
+                    key={paneTf}
+                    className={`panel chart-panel ${tf === paneTf ? 'focused-pane' : ''}`}
+                    onClick={() => setTf(paneTf)}
+                  >
+                    <div className="pane-bar">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <strong className="accent-txt">{paneTf.toUpperCase()}</strong>
+                        <span className="muted small">{roleMap[paneTf]}</span>
+                        <BiasPill bias={sum?.biases?.[paneTf]} />
+                      </div>
+                      <div className="muted small mono">
+                        {pData?.overlays ? (
+                          <>
+                            {pData.overlays.structure.trend.toUpperCase()} • RSI{' '}
+                            {Number(pData.overlays.ind.rsi14 || 0).toFixed(0)}
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                    {pData && pData.candles.length > 0 ? (
+                      <SMCChart
+                        data={pData}
+                        showEMA={showEMA}
+                        showOB={showOB}
+                        showFVG={showFVG}
+                        showSR={showSR}
+                        showPlan={showPlan}
+                        detailMode={detailMode}
+                        planSide={effectiveSide}
+                        height={285}
+                        compact
+                      />
+                    ) : (
+                      <div className="empty" style={{ height: 285, display: 'grid', placeItems: 'center' }}>
+                        Loading {paneTf.toUpperCase()}…
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           <PlainEnglishReport report={data?.explanation} symbol={symbol} tf={tf} />
         </div>
 
-        <div className="side-analysis">
+        <div className="side-panels">
           <div className="panel">
-            <h3>Multi-Timeframe Bias</h3>
+            <div className="panel-head">
+              <h3>Multi-Timeframe Bias</h3>
+              <span className="muted small">Click any TF to view</span>
+            </div>
             <div className="mtf-grid">
               {['1w', '1d', '4h', '1h', '15m', '5m'].map((k) => (
-                <div key={k} className="mtf-cell">
+                <div
+                  key={k}
+                  className={`mtf-cell clickable ${tf === k ? 'active-tf-cell' : ''}`}
+                  onClick={() => setTf(k)}
+                >
                   <span className="muted small">{k.toUpperCase()}</span>
                   <BiasPill bias={sum?.biases?.[k]} />
                 </div>
@@ -155,28 +395,107 @@ export const CoinAnalysisPage: React.FC<Props> = ({
           </div>
 
           <div className="panel">
-            <h3>Structural Trade Levels ({sum?.active_side ?? '—'})</h3>
+            <div className="panel-head" style={{ marginBottom: 8 }}>
+              <h3>
+                Structural Trade Levels (
+                <span className={effectiveSide === 'SHORT' ? 'bear-txt' : 'bull-txt'}>{effectiveSide}</span>)
+              </h3>
+              <div className="seg-group">
+                <button
+                  className={`tf-btn ${effectiveSide === 'LONG' ? 'active' : ''}`}
+                  onClick={() => setManualSide('LONG')}
+                >
+                  LONG
+                </button>
+                <button
+                  className={`tf-btn ${effectiveSide === 'SHORT' ? 'active' : ''}`}
+                  onClick={() => setManualSide('SHORT')}
+                >
+                  SHORT
+                </button>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <StatusBadge status={sideStatus} early={false} />
+              <span className="muted small">Based on {(sum?.primary_tf || '1h').toUpperCase()} Structure</span>
+            </div>
+
+            {displayedPlan?.order_type && (
+              <div className="order-type-chip">
+                {displayedPlan.order_type}
+              </div>
+            )}
+
             <div className="kv-list">
-              <div><span>Current Price</span><strong className="mono">{fmtPrice(sum?.price)}</strong></div>
+              <div><span>Current Live Price</span><strong className="mono">{fmtPrice(sum?.price)}</strong></div>
               <div>
-                <span>Entry Zone</span>
+                <span>{effectiveSide} Entry Zone</span>
                 <strong className="mono">
-                  {sum?.entry_zone ? `${fmtPrice(sum.entry_zone[0])} – ${fmtPrice(sum.entry_zone[1])}` : '—'}
+                  {planEntryZone ? `${fmtPrice(planEntryZone[0])} – ${fmtPrice(planEntryZone[1])}` : 'No valid zone'}
                 </strong>
               </div>
-              <div><span>Suggested Entry</span><strong className="mono accent-txt">{fmtPrice(sum?.entry)}</strong></div>
-              <div><span>Invalidation</span><strong className="mono bear-txt">{fmtPrice(sum?.invalidation)}</strong></div>
-              <div><span>Target 1</span><strong className="mono bull-txt">{fmtPrice(sum?.targets?.[0])}</strong></div>
-              <div><span>Target 2</span><strong className="mono bull-txt">{fmtPrice(sum?.targets?.[1])}</strong></div>
-              <div><span>Target 3</span><strong className="mono bull-txt">{fmtPrice(sum?.targets?.[2])}</strong></div>
-              <div><span>Risk / Reward</span><strong className="mono">{sum?.rr ? `${sum.rr} R` : '—'}</strong></div>
-              <div><span>Dealing Range</span><strong className="mono">{ov?.smc.zone?.toUpperCase() ?? '—'}</strong></div>
+              {displayedPlan?.entry_reason && (
+                <div className="reason-subrow">
+                  <span>Zone Basis: {displayedPlan.entry_reason}</span>
+                </div>
+              )}
+              <div>
+                <span>Suggested {effectiveSide} Entry</span>
+                <strong className="mono accent-txt">{fmtPrice(planEntry)}</strong>
+              </div>
+              <div>
+                <span>Stop-Loss ({effectiveSide === 'SHORT' ? 'Above Entry' : 'Below Entry'})</span>
+                <strong className="mono bear-txt">{fmtPrice(planInv)}</strong>
+              </div>
+              {displayedPlan?.invalidation_reason && (
+                <div className="reason-subrow">
+                  <span>SL Basis: {displayedPlan.invalidation_reason}</span>
+                </div>
+              )}
+              {[0, 1, 2].map((i) => {
+                const td = planTargetDetails[i];
+                const tVal = planTargets[i];
+                return (
+                  <React.Fragment key={i}>
+                    <div>
+                      <span>Target {i + 1} ({effectiveSide === 'SHORT' ? '▼ Below' : '▲ Above'})</span>
+                      <strong className="mono bull-txt">
+                        {fmtPrice(tVal)}{td?.rr ? ` (${td.rr}R)` : ''}
+                      </strong>
+                    </div>
+                    {td?.source && (
+                      <div className="reason-subrow">
+                        <span>TP{i + 1} Magnet: {td.source}</span>
+                      </div>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+              <div><span>Estimated Risk / Reward</span><strong className="mono">{planRR ? `${planRR} R` : '—'}</strong></div>
+              <div><span>Dealing Range Position</span><strong className="mono">{ov?.smc.zone?.toUpperCase() ?? '—'}</strong></div>
             </div>
+
+            <button
+              className="btn ghost"
+              style={{ width: '100%', marginTop: 10, fontSize: 11.5 }}
+              onClick={() => setShowRulesHelp((v) => !v)}
+            >
+              {showRulesHelp ? '▲ Hide Entry / Stop / Target Formula' : '▼ How Entry, Stop & Targets Are Calculated'}
+            </button>
+
+            {showRulesHelp && (
+              <div className="formula-help-box">
+                <p><strong>1. Entry Zone &amp; Suggested Entry:</strong> Derived from the nearest unviolated 1H Order Block (`OB`), Fair Value Gap (`FVG`), or multi-touch S/R cluster on the pullback side of price (below price for <b>LONG</b>, above price for <b>SHORT</b>). If price is already inside the zone, entry = live price; otherwise entry = zone edge (`OB/FVG top` for Long limit buy, `OB/FVG base` for Short limit sell).</p>
+                <p><strong>2. Hard Invalidation (Stop-Loss):</strong> Placed <b>0.25 × ATR(14)</b> beyond BOTH the Entry Zone outer edge and the protecting structural Swing Low (for Long) or Swing High (for Short) — never a fixed arbitrary %.</p>
+                <p><strong>3. Profit Targets (TP1–TP3):</strong> Ranked opposing structural liquidity pools spaced at least <b>0.4 × ATR</b> apart: Horizontal S/R clusters, Previous Day/Week Highs &amp; Lows (`PDH`/`PDL`, `PWH`/`PWL`), Dealing Range extremes, and opposing Order Blocks.</p>
+              </div>
+            )}
           </div>
 
           {data?.sentiment && (
             <div className="panel">
-              <h3>Futures Positioning & Squeeze Data</h3>
+              <h3>Futures Positioning &amp; Squeeze Data</h3>
               <div className="kv-list">
                 {data.sentiment.funding_rate_pct !== undefined && (
                   <div>
@@ -226,7 +545,7 @@ export const CoinAnalysisPage: React.FC<Props> = ({
 
           {ov && (
             <div className="panel">
-              <h3>{tf.toUpperCase()} Indicators & Key Levels</h3>
+              <h3>{tf.toUpperCase()} Indicators &amp; Key Levels</h3>
               <div className="kv-list">
                 <div><span>Structure Trend</span><strong>{ov.structure.trend.toUpperCase()}</strong></div>
                 <div><span>EMA Stack</span><strong>{String(ov.ind.ema_stack || '').toUpperCase()}</strong></div>

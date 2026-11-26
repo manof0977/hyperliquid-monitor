@@ -9,7 +9,7 @@ interface OppResponse {
   early_watch: ScanRow[];
 }
 
-export const TopOpportunitiesPage: React.FC<{ onSelectCoin: (s: string) => void }> = ({ onSelectCoin }) => {
+export const TopOpportunitiesPage: React.FC<{ onSelectCoin: (s: string, side?: 'LONG' | 'SHORT') => void }> = ({ onSelectCoin }) => {
   const [data, setData] = useState<OppResponse | null>(null);
 
   useEffect(() => {
@@ -44,8 +44,9 @@ export const TopOpportunitiesPage: React.FC<{ onSelectCoin: (s: string) => void 
           <tbody>
             {items.map((r, i) => {
               const plan = side === 'long' ? r.long_plan : r.short_plan;
+              const sideStat = side === 'long' ? (r.long_status || r.status) : (r.short_status || r.status);
               return (
-                <tr key={r.symbol} className="clickable" onClick={() => onSelectCoin(r.symbol)}>
+                <tr key={r.symbol} className="clickable" onClick={() => onSelectCoin(r.symbol, side === 'long' ? 'LONG' : 'SHORT')}>
                   <td className="muted">{i + 1}</td>
                   <td className="sym">{r.symbol}</td>
                   <td className="mono">{fmtPrice(r.price)}</td>
@@ -57,7 +58,7 @@ export const TopOpportunitiesPage: React.FC<{ onSelectCoin: (s: string) => void 
                   <td><ScoreCell value={side === 'long' ? r.long_tech_score : r.short_tech_score} side={side} /></td>
                   <td><ScoreCell value={side === 'long' ? r.long_opp_score : r.short_opp_score} side={side} /></td>
                   <td className="mono">{plan?.rr ? `${plan.rr}R` : '—'}</td>
-                  <td><StatusBadge status={r.status} early={r.early_watch} /></td>
+                  <td><StatusBadge status={sideStat} early={r.early_watch} /></td>
                 </tr>
               );
             })}

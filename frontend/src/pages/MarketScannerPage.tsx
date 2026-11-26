@@ -3,7 +3,7 @@ import { apiGet, fmtPrice, fmtVol, ScanRow } from '../api/client';
 import { BiasPill, ScoreCell, StatusBadge } from '../components/Badges';
 
 interface Props {
-  onSelectCoin: (sym: string) => void;
+  onSelectCoin: (sym: string, side?: 'LONG' | 'SHORT') => void;
   watchlist: string[];
   onToggleWatch: (sym: string, add: boolean) => void;
 }
@@ -123,8 +123,15 @@ export const MarketScannerPage: React.FC<Props> = ({ onSelectCoin, watchlist, on
             ) : (
               rows.map((r) => {
                 const starred = watchlist.includes(r.symbol);
+                const rowSide: 'LONG' | 'SHORT' = r.status.startsWith('SHORT')
+                  ? 'SHORT'
+                  : r.status.startsWith('LONG')
+                  ? 'LONG'
+                  : r.active_side === 'SHORT'
+                  ? 'SHORT'
+                  : 'LONG';
                 return (
-                  <tr key={r.symbol} className="clickable" onClick={() => onSelectCoin(r.symbol)}>
+                  <tr key={r.symbol} className="clickable" onClick={() => onSelectCoin(r.symbol, rowSide)}>
                     <td
                       onClick={(e) => {
                         e.stopPropagation();

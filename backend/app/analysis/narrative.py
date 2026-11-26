@@ -43,16 +43,17 @@ def _build_next_move_map(
     l_opp = float((summary or {}).get("long_opp_score") or 0.0)
     s_opp = float((summary or {}).get("short_opp_score") or 0.0)
 
-    l_raw = max(1.0, l_tech * 0.65 + l_opp * 0.35)
-    s_raw = max(1.0, s_tech * 0.65 + s_opp * 0.35)
+    status_now = (summary or {}).get("status", "NO SETUP")
+    l_raw = max(1.0, l_tech * 0.60 + l_opp * 0.40)
+    s_raw = max(1.0, s_tech * 0.60 + s_opp * 0.40)
     bull_pct = round(l_raw / (l_raw + s_raw) * 100.0, 1)
     bear_pct = round(100.0 - bull_pct, 1)
-    if bull_pct >= 56.0:
-        favored = "BULLISH"
-        lean_label = f"Bullish Continuation / Rebound Favored ({bull_pct}% vs {bear_pct}% confluence weight)"
-    elif bear_pct >= 56.0:
+    if status_now.startswith("SHORT CONFIRMED") or status_now.startswith("SHORT DEVELOPING") or bear_pct >= 56.0:
         favored = "BEARISH"
-        lean_label = f"Bearish Continuation / Rejection Favored ({bear_pct}% vs {bull_pct}% confluence weight)"
+        lean_label = f"Bearish Path Favored ({status_now} • {bear_pct}% Bear vs {bull_pct}% Bull confluence weight)"
+    elif status_now.startswith("LONG CONFIRMED") or status_now.startswith("LONG DEVELOPING") or bull_pct >= 56.0:
+        favored = "BULLISH"
+        lean_label = f"Bullish Path Favored ({status_now} • {bull_pct}% Bull vs {bear_pct}% Bear confluence weight)"
     else:
         favored = "BALANCED"
         lean_label = f"Balanced / Two-Way Rotational Chop ({bull_pct}% Bull vs {bear_pct}% Bear confluence weight)"
@@ -549,14 +550,20 @@ def build_plain_english_report(
         plan_bullets = []
         if ez and entry and inv:
             risk_pct = abs(entry - inv) / entry * 100 if entry else 0.0
+            entry_why = plan.get("entry_reason") or plan.get("zone_source", "Structural Zone")
+            ord_why = plan.get("order_type") or f"{side} Execution"
+            inv_why = plan.get("invalidation_reason") or "0.25 ATR beyond structural swing/zone"
+            t_details = plan.get("target_details") or []
             plan_bullets.append(
-                f"Primary {side} Entry Zone ({plan.get('zone_source', 'Structural')}): {_fp(ez[0])} to {_fp(ez[1])} "
-                f"(Suggested Execution Reference: {_fp(entry)})."
+                f"How Entry Is Set ({entry_why}): Zone {_fp(ez[0])} – {_fp(ez[1])} → Suggested Entry {_fp(entry)} ({ord_why})."
             )
             plan_bullets.append(
-                f"Structural Invalidation (Hard Stop-Loss): {_fp(inv)} ({risk_pct:.2f}% risk from entry — if price crosses this level, the {side.lower()} market structure thesis is mathematically proven wrong)."
+                f"How Stop-Loss Is Set ({inv_why}): Hard Invalidation at {_fp(inv)} ({risk_pct:.2f}% risk from entry — crossing this level breaks the {side.lower()} market structure)."
             )
-            if tgts:
+            if t_details:
+                t_str = " → ".join(f"TP{i + 1}: {_fp(td['price'])} [{td['source']}, {td['rr']}R]" for i, td in enumerate(t_details))
+                plan_bullets.append(f"How Targets Are Set (Opposing Liquidity / S/R / OBs spaced ≥ 0.4 ATR): {t_str}.")
+            elif tgts:
                 t_str = " → ".join(f"TP{i + 1}: {_fp(t)}" for i, t in enumerate(tgts))
                 plan_bullets.append(f"Structural Profit Targets: {t_str} (Estimated Risk/Reward: {rr}R).")
             else:

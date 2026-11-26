@@ -18,15 +18,25 @@ export interface ScannerStatus {
   early_watch_count: number;
 }
 
+export interface TargetDetail {
+  price: number;
+  source: string;
+  rr: number;
+}
+
 export interface TradePlan {
   has_plan: boolean;
   opportunity_score: number;
   opp_breakdown?: Record<string, number>;
   zone_source?: string;
+  entry_reason?: string | null;
+  order_type?: string | null;
+  invalidation_reason?: string | null;
   entry_zone: [number, number] | null;
   entry: number | null;
   invalidation: number | null;
   targets: number[];
+  target_details?: TargetDetail[];
   rr: number;
   dist_atr?: number;
   in_zone?: boolean;
@@ -36,6 +46,7 @@ export interface TradePlan {
 export interface ScanRow {
   symbol: string;
   base_asset?: string;
+  primary_tf?: string;
   price: number;
   change_24h: number;
   volume_24h: number;
@@ -44,6 +55,8 @@ export interface ScanRow {
   short_tech_score: number;
   long_opp_score: number;
   short_opp_score: number;
+  long_status?: string;
+  short_status?: string;
   long_tier?: string;
   short_tier?: string;
   long_breakdown?: Record<string, number>;
@@ -58,6 +71,10 @@ export interface ScanRow {
   entry?: number | null;
   invalidation?: number | null;
   targets?: number[];
+  target_details?: TargetDetail[];
+  order_type?: string | null;
+  entry_reason?: string | null;
+  invalidation_reason?: string | null;
   rr?: number;
   zone?: string;
 }

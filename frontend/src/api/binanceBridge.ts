@@ -165,11 +165,18 @@ class BrowserBinanceBridge {
     const frames: Record<string, unknown[][]> = {};
     await Promise.all([
       ...tfs.map(async (tf) => {
-        try {
-          const lim = tf === '1d' || tf === '1w' ? 99 : 250;
-          const r = await fetch(`${this.spec!.rest}/klines?symbol=${encodeURIComponent(symbol)}&interval=${tf}&limit=${lim}`);
-          if (r.ok) frames[tf] = await r.json();
-        } catch {}
+        const lim = tf === '1d' || tf === '1w' ? 99 : 300;
+        const url = `${this.spec!.rest}/klines?symbol=${encodeURIComponent(symbol)}&interval=${tf}&limit=${lim}`;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const r = await fetch(url);
+            if (r.ok) {
+              frames[tf] = await r.json();
+              break;
+            }
+          } catch {}
+          await new Promise((res) => setTimeout(res, 200));
+        }
       }),
       this.syncSymbolSentiment(symbol, '1h'),
     ]);
@@ -397,9 +404,9 @@ class BrowserBinanceBridge {
           continue;
         }
 
-        // Process up to 4 symbols concurrently per batch across ALL Binance USDT perpetual contracts (safe inside rate limits)
+        // Process 3 symbols concurrently per batch across ALL Binance USDT perpetual contracts (safe inside rate limits)
         const ep = this.spec;
-        const workerCount = 4;
+        const workerCount = 3;
         let idx = 0;
         const workers = Array.from({ length: Math.min(workerCount, plan.jobs.length) }, async () => {
           while (idx < plan.jobs.length && !this.stopped) {
@@ -414,12 +421,16 @@ class BrowserBinanceBridge {
                   limit: String(q.limit),
                 });
                 if (q.start_time) params.set('startTime', String(q.start_time));
-                try {
-                  const r = await fetch(`${ep.rest}/klines?${params.toString()}`);
-                  if (r.ok) {
-                    frames[q.tf] = await r.json();
-                  }
-                } catch {}
+                for (let attempt = 0; attempt < 2; attempt++) {
+                  try {
+                    const r = await fetch(`${ep.rest}/klines?${params.toString()}`);
+                    if (r.ok) {
+                      frames[q.tf] = await r.json();
+                      break;
+                    }
+                  } catch {}
+                  await new Promise((res) => setTimeout(res, 180));
+                }
               })
             );
             if (Object.keys(frames).length > 0) {

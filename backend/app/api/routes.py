@@ -134,12 +134,25 @@ async def api_scanner(
     if min_score > 0:
         rows = [r for r in rows if max(r.get("long_tech_score", 0), r.get("short_tech_score", 0)) >= min_score]
 
+    def _status_rank(st: str) -> int:
+        if "CONFIRMED" in st:
+            return 3
+        if "DEVELOPING" in st:
+            return 2
+        if "WATCH" in st:
+            return 1
+        return 0
+
+    def _active_opp(r: dict) -> float:
+        side = r.get("active_side", "LONG")
+        return r.get("long_opp_score", 0) if side == "LONG" else r.get("short_opp_score", 0)
+
     key_map = {
         "long_tech": lambda r: (r.get("long_tech_score", 0), r.get("volume_24h", 0)),
         "short_tech": lambda r: (r.get("short_tech_score", 0), r.get("volume_24h", 0)),
         "long_opp": lambda r: (r.get("long_opp_score", 0), r.get("volume_24h", 0)),
         "short_opp": lambda r: (r.get("short_opp_score", 0), r.get("volume_24h", 0)),
-        "best_opp": lambda r: (max(r.get("long_opp_score", 0), r.get("short_opp_score", 0)), r.get("volume_24h", 0)),
+        "best_opp": lambda r: (_status_rank(r.get("status", "")), _active_opp(r), r.get("volume_24h", 0)),
         "volume": lambda r: r.get("volume_24h", 0),
         "change": lambda r: r.get("change_24h", 0),
     }
@@ -149,7 +162,7 @@ async def api_scanner(
 
 @router.get("/opportunities")
 async def api_opportunities():
-    """Top 20 qualifying LONG and SHORT opportunities — excludes weak (<developing threshold) setups."""
+    """Top 20 qualifying LONG and SHORT opportunities — strictly separated by active side."""
     eng = get_engine()
     min_th = settings.thresholds.developing
     min_opp = settings.thresholds.watch_min
@@ -157,11 +170,15 @@ async def api_opportunities():
 
     longs = [
         r for r in all_rows
-        if r.get("long_tech_score", 0) >= min_th and r.get("long_opp_score", 0) >= min_opp
+        if r.get("long_tech_score", 0) >= min_th
+        and r.get("long_opp_score", 0) >= min_opp
+        and r.get("active_side") == "LONG"
     ]
     shorts = [
         r for r in all_rows
-        if r.get("short_tech_score", 0) >= min_th and r.get("short_opp_score", 0) >= min_opp
+        if r.get("short_tech_score", 0) >= min_th
+        and r.get("short_opp_score", 0) >= min_opp
+        and r.get("active_side") == "SHORT"
     ]
     longs.sort(key=lambda r: (r["long_opp_score"] * 0.55 + r["long_tech_score"] * 0.45), reverse=True)
     shorts.sort(key=lambda r: (r["short_opp_score"] * 0.55 + r["short_tech_score"] * 0.45), reverse=True)
@@ -311,13 +328,16 @@ async def api_backtest(req: BacktestReq):
 async def api_ws(ws: WebSocket):
     await ws.accept()
     eng = get_engine()
+
+    def _ws_rank(r: dict):
+        st = r.get("status", "")
+        rk = 3 if "CONFIRMED" in st else (2 if "DEVELOPING" in st else (1 if "WATCH" in st else 0))
+        ao = r.get("long_opp_score", 0) if r.get("active_side", "LONG") == "LONG" else r.get("short_opp_score", 0)
+        return (rk, ao, r.get("volume_24h", 0))
+
     try:
         while True:
-            top = sorted(
-                eng.results.values(),
-                key=lambda r: max(r.get("long_opp_score", 0), r.get("short_opp_score", 0)),
-                reverse=True,
-            )[:30]
+            top = sorted(eng.results.values(), key=_ws_rank, reverse=True)[:30]
             await ws.send_json({"type": "tick", "status": eng.status_snapshot(), "top": top})
             await asyncio.sleep(3)
     except WebSocketDisconnect:

@@ -32,6 +32,7 @@ const NAV: { id: Tab; label: string }[] = [
 export const App: React.FC = () => {
   const [tab, setTab] = useState<Tab>('dashboard');
   const [selectedCoin, setSelectedCoin] = useState('BTCUSDT');
+  const [preferredSide, setPreferredSide] = useState<'LONG' | 'SHORT' | null>(null);
   const [status, setStatus] = useState<ScannerStatus | null>(null);
   const [topRows, setTopRows] = useState<ScanRow[]>([]);
   const [symbols, setSymbols] = useState<string[]>(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']);
@@ -87,8 +88,9 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  const openCoin = (sym: string) => {
+  const openCoin = (sym: string, side?: 'LONG' | 'SHORT') => {
     setSelectedCoin(sym);
+    setPreferredSide(side ?? null);
     setTab('analysis');
   };
 
@@ -168,8 +170,12 @@ export const App: React.FC = () => {
         {tab === 'analysis' && (
           <CoinAnalysisPage
             symbol={selectedCoin}
+            preferredSide={preferredSide}
             symbols={symbols}
-            onChangeSymbol={setSelectedCoin}
+            onChangeSymbol={(s) => {
+              setSelectedCoin(s);
+              setPreferredSide(null);
+            }}
             watchlist={watchlist}
             onToggleWatch={toggleWatch}
           />

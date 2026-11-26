@@ -7,7 +7,7 @@ interface Props {
   status: ScannerStatus | null;
   bridge?: BridgeState | null;
   topRows: ScanRow[];
-  onSelectCoin: (sym: string) => void;
+  onSelectCoin: (sym: string, side?: 'LONG' | 'SHORT') => void;
   onTriggerScan: () => void;
 }
 
@@ -105,19 +105,28 @@ export const DashboardPage: React.FC<Props> = ({ status, bridge, topRows, onSele
                 </tr>
               </thead>
               <tbody>
-                {topRows.slice(0, 10).map((r) => (
-                  <tr key={r.symbol} onClick={() => onSelectCoin(r.symbol)} className="clickable">
-                    <td className="sym">{r.symbol}</td>
-                    <td className="mono">{fmtPrice(r.price)}</td>
-                    <td className={r.change_24h >= 0 ? 'bull-txt mono' : 'bear-txt mono'}>
-                      {r.change_24h >= 0 ? '+' : ''}
-                      {r.change_24h.toFixed(2)}%
-                    </td>
-                    <td><ScoreCell value={r.long_opp_score} side="long" /></td>
-                    <td><ScoreCell value={r.short_opp_score} side="short" /></td>
-                    <td><StatusBadge status={r.status} early={r.early_watch} /></td>
-                  </tr>
-                ))}
+                {topRows.slice(0, 10).map((r) => {
+                  const rowSide: 'LONG' | 'SHORT' = r.status.startsWith('SHORT')
+                    ? 'SHORT'
+                    : r.status.startsWith('LONG')
+                    ? 'LONG'
+                    : r.active_side === 'SHORT'
+                    ? 'SHORT'
+                    : 'LONG';
+                  return (
+                    <tr key={r.symbol} onClick={() => onSelectCoin(r.symbol, rowSide)} className="clickable">
+                      <td className="sym">{r.symbol}</td>
+                      <td className="mono">{fmtPrice(r.price)}</td>
+                      <td className={r.change_24h >= 0 ? 'bull-txt mono' : 'bear-txt mono'}>
+                        {r.change_24h >= 0 ? '+' : ''}
+                        {r.change_24h.toFixed(2)}%
+                      </td>
+                      <td><ScoreCell value={r.long_opp_score} side="long" /></td>
+                      <td><ScoreCell value={r.short_opp_score} side="short" /></td>
+                      <td><StatusBadge status={r.status} early={r.early_watch} /></td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

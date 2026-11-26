@@ -232,7 +232,7 @@ class ScannerEngine:
 
     async def analyze_one(self, symbol: str, sync_network: bool = True) -> dict | None:
         frames = await self.ensure_symbol_frames(symbol, sync_network=sync_network)
-        if not frames:
+        if not frames or "1h" not in frames:
             return None
         prev = self.results.get(symbol)
         prev_status = prev.get("status") if prev else None
