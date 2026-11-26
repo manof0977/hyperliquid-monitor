@@ -106,7 +106,7 @@
       <div class="two">
         <div class="panel">
           <h3 style="margin:0 0 10px">Highest Opportunity Setups</h3>
-          <table><thead><tr><th>Symbol</th><th>Price</th><th>24H</th><th>Long Opp</th><th>Short Opp</th><th>Status</th></tr></thead><tbody id="dashTop"></tbody></table>
+          <table><thead><tr><th>Symbol</th><th>Price</th><th>24H</th><th>Long Opp</th><th>Short Opp</th><th>Status</th><th>Pre-Indicator Reaction</th></tr></thead><tbody id="dashTop"></tbody></table>
         </div>
         <div class="panel">
           <h3 style="margin:0 0 10px">Early Watch Pre-Breakout Radar</h3>
@@ -126,11 +126,21 @@
           <option value="short_tech">Sort: Highest Short Technical</option>
           <option value="vol">Sort: 24H Volume</option>
         </select>
+        <select id="qReaction">
+          <option value="ALL">All Pre-Indicator States</option>
+          <option value="ACTIONABLE_NOW">Any Active Reaction (Bounce / Reversal / Pullback)</option>
+          <option value="BOUNCE_ZONE">Bounce Zones (demand tap)</option>
+          <option value="PULLBACK_DUE">Pullback / Snapback Due (ATR stretch)</option>
+          <option value="REVERSAL_ANY">Reversal Zones (liquidity sweep)</option>
+          <option value="BULLISH_REVERSAL_ZONE">Bottom Reversal Zones</option>
+          <option value="BEARISH_REVERSAL_ZONE">Top Reversal Zones</option>
+          <option value="MID_RANGE_WAIT">Mid-Range Wait (no edge)</option>
+        </select>
         <label class="muted"><input type="checkbox" id="qEarly" /> Early Watch Only</label>
       </div>
       <div class="tblwrap">
         <table>
-          <thead><tr><th>★</th><th>Symbol</th><th>Price</th><th>24H</th><th>24H Vol</th><th>1D</th><th>4H</th><th>1H</th><th>15M</th><th>Long Tech</th><th>Short Tech</th><th>Long Opp</th><th>Short Opp</th><th>Status</th></tr></thead>
+          <thead><tr><th>★</th><th>Symbol</th><th>Price</th><th>24H</th><th>24H Vol</th><th>1D</th><th>4H</th><th>1H</th><th>15M</th><th>Long Tech</th><th>Short Tech</th><th>Long Opp</th><th>Short Opp</th><th>Status</th><th>Pre-Indicator Reaction</th></tr></thead>
           <tbody id="scanBody"></tbody>
         </table>
       </div>
@@ -175,6 +185,7 @@
             <div id="chartStage"><canvas id="overlayCanvas"></canvas></div>
           </div>
           <div id="mtfGridWrap" class="hide" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:14px"></div>
+          <div class="panel" id="rxRadarPanel" style="display:none"></div>
           <div class="panel" id="plainEnglishPanel">
             <h3 style="margin:0 0 10px">Full Plain-English Technical Breakdown</h3>
             <div id="plainEnglishBody" class="muted">Select a coin to read its full plain-English analysis…</div>
@@ -335,10 +346,161 @@ function analyzeCandles(kl){
   const bearStack = ema20[n-1]<ema50[n-1]&&ema50[n-1]<ema100[n-1]&&ema100[n-1]<ema200[n-1];
   const bias = (trend==='bullish'&&(bullStack||cur>ema50[n-1]))?'BULLISH':(trend==='bearish'&&(bearStack||cur<ema50[n-1]))?'BEARISH':'NEUTRAL';
   const volSma = v.slice(-20).reduce((a,b)=>a+b,0)/Math.min(20,v.length);
-  return { t,o,h,l,c,v,ema20,ema50,ema100,ema200,rsi,atr,cur,curAtr,trend,bias,bullStack,bearStack,swings,breaks,fvgs:fvgs.slice(-8),obs:obs.slice(-8),sweeps:sweeps.slice(-8),volRatio:v[n-1]/(volSma||1),macdLast:macdH[n-1],n };
+  // --- Raw candle anatomy for the Pre-Indicator Reaction Engine (closed bars only) ---
+  const li = Math.max(0, n-2);
+  const wickOf = (i) => { const rng = Math.max(h[i]-l[i], 1e-9); return {
+    up: Math.max(0, h[i] - Math.max(o[i], c[i])) / rng * 100,
+    lo: Math.max(0, Math.min(o[i], c[i]) - l[i]) / rng * 100 }; };
+  const wickClosed = wickOf(li);
+  const stretchAtr = (cur - ema20[n-1]) / curAtr;
+  let consecUp = 0, consecDn = 0;
+  for(let i=li;i>=Math.max(0,li-9);i--){
+    if(c[i]>o[i]){ if(consecDn>0) break; consecUp++; }
+    else if(c[i]<o[i]){ if(consecUp>0) break; consecDn++; }
+    else break;
+  }
+  const drHigh = ph ? Math.max(ph.p, cur) : null, drLow = pl ? Math.min(pl.p, cur) : null;
+  const drPos = (drHigh!=null && drLow!=null && drHigh>drLow) ? (cur-drLow)/(drHigh-drLow) : 0.5;
+  return { t,o,h,l,c,v,ema20,ema50,ema100,ema200,rsi,atr,cur,curAtr,trend,bias,bullStack,bearStack,swings,breaks,
+    fvgs:fvgs.slice(-8),obs:obs.slice(-8),sweeps:sweeps.slice(-8),volRatio:v[n-1]/(volSma||1),macdLast:macdH[n-1],n,
+    closedUpWick:wickClosed.up, closedLoWick:wickClosed.lo, stretchAtr, consecUp, consecDn,
+    drHigh: drHigh==null?null:drHigh, drLow: drLow==null?null:drLow, drPos, lastSwingHigh: ph?ph.p:null, lastSwingLow: pl?pl.p:null };
 }
 
-function scoreSymbol(sym, mtf){
+
+// ---------------------------------------------------------------------------
+// PRE-INDICATOR PRICE-ACTION REACTION ENGINE (deterministic, zero lag, no guesswork)
+// States: BOUNCE_ZONE / PULLBACK_DUE / BULLISH_REVERSAL_ZONE / BEARISH_REVERSAL_ZONE / MID_RANGE_WAIT
+// ---------------------------------------------------------------------------
+function rxZone(d, side){
+  const A = d.curAtr, P = d.cur, cands = [];
+  const add = (label, lo, hi, base) => {
+    const inZ = P>=lo && P<=hi;
+    const dist = inZ ? 0 : Math.min(Math.abs(P-hi), Math.abs(P-lo))/A;
+    if(dist > 6.5) return;
+    cands.push({ label, low:lo, high:hi, in_zone:inZ, distance_atr:+dist.toFixed(2),
+      score: inZ ? base+3 : base - dist*1.5 });
+  };
+  for(const ob of d.obs){
+    if(side==='demand' ? ob.kind!=='bullish' : ob.kind!=='bearish') continue;
+    const lo = Math.min(ob.bot,ob.top), hi = Math.max(ob.bot,ob.top);
+    if(side==='demand' ? lo > P*1.008 : hi < P*0.992) continue;
+    add(`${side==='demand'?'Bullish Demand':'Bearish Supply'} Order Block`, lo, hi, 9);
+  }
+  for(const g of d.fvgs){
+    if(side==='demand' ? g.kind!=='bullish' : g.kind!=='bearish') continue;
+    const lo = Math.min(g.bot,g.top), hi = Math.max(g.bot,g.top);
+    if(side==='demand' ? lo > P*1.008 : hi < P*0.992) continue;
+    add(`${side==='demand'?'Bullish':'Bearish'} Fair Value Gap`, lo, hi, 7.8);
+  }
+  const lvl = side==='demand' ? d.lastSwingLow : d.lastSwingHigh;
+  if(lvl!=null && (side==='demand' ? lvl <= P*1.006 : lvl >= P*0.994)){
+    add(side==='demand' ? 'Protected Swing Low (sell-side liquidity)' : 'Protected Swing High (buy-side liquidity)',
+        lvl-0.15*A, lvl+0.15*A, 7.2);
+  }
+  if(!cands.length) return null;
+  cands.sort((a,b)=>b.score-a.score);
+  const z = cands[0];
+  const inv = side==='demand' ? z.low - 0.25*A : z.high + 0.25*A;
+  const eq = (d.drHigh!=null && d.drLow!=null) ? (d.drHigh+d.drLow)/2 : null;
+  const tgtC = side==='demand'
+    ? [eq, d.drHigh].filter(x=>x!=null && x >= z.high + 0.55*A)
+    : [eq, d.drLow].filter(x=>x!=null && x <= z.low - 0.55*A);
+  const tgt = tgtC.length ? (side==='demand' ? Math.min(...tgtC) : Math.max(...tgtC))
+                          : (side==='demand' ? z.high + 1.6*A : z.low - 1.6*A);
+  return { label:z.label, low:z.low, high:z.high, in_zone:z.in_zone, distance_atr:z.distance_atr,
+           invalidation:inv, target_1:tgt };
+}
+
+function reactionEngine(d, biases, sent){
+  if(!d) return { state:'MID_RANGE_WAIT', badge_label:'AWAITING DATA', bias_lean:'NEUTRAL_WAIT',
+    range_position_pct:50, ema20_stretch_atr:0, summary:'Waiting for candle history.', why_before_indicators:[],
+    bounce_zone:null, rejection_zone:null, aggressive_trigger:'Wait for candles.', conservative_trigger:'Wait for candles.' };
+  biases = biases || {};
+  const A = d.curAtr, P = d.cur, stretch = d.stretchAtr;
+  const rawPos = d.drPos;
+  const pos = Math.round(Math.max(0,Math.min(1,rawPos))*1000)/10;
+  const rangeNote = rawPos>1 ? ` (price ${((rawPos-1)*100).toFixed(0)}% ABOVE the last confirmed swing-high ceiling — extended)`
+                  : rawPos<0 ? ` (price ${(Math.abs(rawPos)*100).toFixed(0)}% BELOW the last confirmed swing-low floor — extended)` : '';
+  const tfSide = d.bullStack ? 'bullish' : d.bearStack ? 'bearish' : (d.trend==='neutral' ? 'neutral' : d.trend);
+  const bz = rxZone(d,'demand'), rz = rxZone(d,'supply');
+  const bDist = bz ? bz.distance_atr : 99, rDist = rz ? rz.distance_atr : 99;
+  const nearD = bDist <= 0.55, nearS = rDist <= 0.55;
+  const lastClosed = Math.max(0, d.n-2);
+  const sweepBull = (d.sweeps||[]).filter(w=>w.kind==='bullish' && lastClosed-w.i<=6);
+  const sweepBear = (d.sweeps||[]).filter(w=>w.kind==='bearish' && lastClosed-w.i<=6);
+  const fr = sent && typeof sent.fundingRatePct === 'number' ? sent.fundingRatePct : null;
+  const htfBull = biases['1d']==='BULLISH' || biases['4h']==='BULLISH';
+  const htfBear = biases['1d']==='BEARISH' || biases['4h']==='BEARISH';
+
+  const ev = [`Range Location: ${pos.toFixed(0)}% of ${d.__tf||''} dealing range${rangeNote} • Stretch from EMA20: ${stretch>=0?'+':''}${stretch.toFixed(2)} ATR.`];
+  if(sweepBull.length) ev.push(`Sell-Side Liquidity Sweep: wick pierced a prior swing low and closed back above (stop-hunt absorption).`);
+  if(sweepBear.length) ev.push(`Buy-Side Liquidity Sweep: wick pierced a prior swing high and closed back below (breakout trap).`);
+  if(d.closedLoWick>=35) ev.push(`Closed-bar lower rejection wick: ${d.closedLoWick.toFixed(0)}% of bar range (buyers absorbing at lows, Vol ${d.volRatio.toFixed(2)}x SMA20).`);
+  if(d.closedUpWick>=35) ev.push(`Closed-bar upper rejection wick: ${d.closedUpWick.toFixed(0)}% of bar range (sellers capping highs, Vol ${d.volRatio.toFixed(2)}x SMA20).`);
+  if(fr!=null && fr>=0.025) ev.push(`Crowded long perp funding (${fr>=0?'+':''}${fr.toFixed(4)}%) — pullback / long-squeeze risk.`);
+  if(fr!=null && fr<=-0.012) ev.push(`Negative perp funding (${fr.toFixed(4)}%) — short-squeeze fuel on any bounce.`);
+
+  let state, badge, lean, summary;
+  if(tfSide==='bearish' && (sweepBull.length || (nearD && d.closedLoWick>=45 && fr!=null && fr<=-0.012))){
+    state='BULLISH_REVERSAL_ZONE'; badge='BOTTOM REVERSAL'; lean='BULLISH_REACTION';
+    summary = `May Reverse Up From Here: EMAs/trend still read bearish (scaring indicator followers) but raw price is reacting at `
+      + (bz?`${fmtP(bz.low)}–${fmtP(bz.high)} (${bz.label})`:fmtP(P)) + ` with stop-hunt / absorption signs.`;
+  } else if(tfSide==='bullish' && (sweepBear.length || (nearS && d.closedUpWick>=45 && fr!=null && fr>=0.02))){
+    state='BEARISH_REVERSAL_ZONE'; badge='TOP REVERSAL'; lean='BEARISH_REACTION';
+    summary = `May Reverse Down From Here: EMAs/trend still look bullish (tempting late buyers) but raw price is testing `
+      + (rz?`${fmtP(rz.low)}–${fmtP(rz.high)} (${rz.label})`:'overhead supply') + ` after a liquidity sweep / upside exhaustion.`;
+  } else if(nearD && (htfBull || tfSide!=='bearish' || pos<=40)){
+    state='BOUNCE_ZONE'; badge='BOUNCE ZONE'; lean='BULLISH_REACTION';
+    summary = `May Bounce From Here: price dipped into ${fmtP(bz.low)}–${fmtP(bz.high)} (${bz.label}) at ${pos.toFixed(0)}% of range. `
+      + `Reaction traders watch this band for a bounce toward ${fmtP(bz.target_1)} while ${fmtP(bz.invalidation)} holds.`;
+  } else if(stretch>=1.65 || (d.consecUp>=4 && pos>=72) || (nearS && (d.closedUpWick>=35 || htfBear || pos>=78))){
+    state='PULLBACK_DUE'; badge='PULLBACK DUE'; lean='BEARISH_REACTION';
+    summary = `May Take Pullback From Here: price is ${stretch>=0?'+':''}${stretch.toFixed(2)} ATR from EMA20 (${fmtP(d.ema20[d.n-1])}) near `
+      + (rz?`${fmtP(rz.low)}–${fmtP(rz.high)} (${rz.label})`:'overhead supply') + ` at ${pos.toFixed(0)}% of range — chasing here has poor R:R.`;
+  } else if(stretch<=-1.65 || (d.consecDn>=4 && pos<=25)){
+    state='PULLBACK_DUE'; badge='SNAPBACK DUE'; lean='BULLISH_REACTION';
+    summary = `May Snap Back Up From Here: price is ${stretch.toFixed(2)} ATR below EMA20 (${fmtP(d.ema20[d.n-1])}) after heavy selling — shorting deep discount carries relief-bounce risk.`;
+  } else {
+    state='MID_RANGE_WAIT'; badge='MID-RANGE'; lean='NEUTRAL_WAIT';
+    summary = `Mid-Range (No Pre-Indicator Edge Here): price sits at ${pos.toFixed(0)}% of the dealing range with no institutional wall at this exact price. `
+      + `Wait for the Bounce Zone ${bz?fmtP(bz.low)+'–'+fmtP(bz.high)+` (${bz.distance_atr} ATR below)`:'below'} or the Supply/Pullback Zone ${rz?fmtP(rz.low)+'–'+fmtP(rz.high)+` (${rz.distance_atr} ATR above)`:'above'}.`;
+  }
+
+  let agg, cons;
+  if(lean==='BEARISH_REACTION' && !rz){
+    agg = 'Aggressive pre-indicator style: no overhead supply wall within 6 ATR — do not chase; wait for a fresh displacement + BOS to print a new Supply OB or bearish FVG to sell into.';
+    cons = 'Safer early style: stand aside until a clean closed-candle bearish CHoCH prints at a swing high.';
+  } else if(lean==='BULLISH_REACTION' && !bz){
+    agg = 'Aggressive pre-indicator style: no demand wall within 6 ATR — do not catch a falling knife; wait for a fresh sell-side sweep + bullish CHoCH to print a new Demand OB or bullish FVG.';
+    cons = 'Safer early style: stand aside until a clean closed-candle bullish CHoCH prints at a swing low.';
+  } else if(lean==='BEARISH_REACTION' && rz){
+    agg = `Aggressive pre-indicator style: watch ${fmtP(rz.low)}–${fmtP(rz.high)} (${rz.label}) for an upper rejection wick closing back below ${fmtP(rz.high)}. Hard stop ${fmtP(rz.invalidation)} (0.25 ATR above zone) → Pullback target ${fmtP(rz.target_1)}.`;
+    cons = `Safer early style (still ahead of HTF indicators): let price tap ${fmtP(rz.low)}–${fmtP(rz.high)} and enter on the first closed 5m/15m bearish CHoCH.`;
+  } else if(bz){
+    agg = `Aggressive pre-indicator style: watch ${fmtP(bz.low)}–${fmtP(bz.high)} (${bz.label}) for a lower rejection wick closing back above ${fmtP(bz.low)}. Hard stop ${fmtP(bz.invalidation)} (0.25 ATR below zone) → Bounce target ${fmtP(bz.target_1)}.`;
+    cons = `Safer early style (still ahead of HTF indicators): let price hold ${fmtP(bz.low)}–${fmtP(bz.high)} and enter on the first closed 5m/15m bullish CHoCH.`;
+  } else {
+    agg = 'Wait for a fresh impulse + BOS to leave behind a clean Order Block or Fair Value Gap.';
+    cons = 'Wait for a closed-candle 5m/15m CHoCH at a structural swing.';
+  }
+  return { state, badge_label:badge, bias_lean:lean, range_position_pct:pos, ema20_stretch_atr:+stretch.toFixed(2),
+    summary, why_before_indicators:ev, bounce_zone:bz, rejection_zone:rz,
+    aggressive_trigger:agg, conservative_trigger:cons };
+}
+
+const rxBadgeHtml = (rx) => {
+  if(!rx) return `<span class="badge b-none">—</span>`;
+  const map = { BOUNCE_ZONE:'#10b981', BULLISH_REVERSAL_ZONE:'#a855f7', BEARISH_REVERSAL_ZONE:'#f43f5e',
+                PULLBACK_DUE:'#f59e0b', MID_RANGE_WAIT:'#64748b' };
+  const col = map[rx.state] || '#64748b';
+  return `<span class="badge" style="background:${col}22;color:${col};border:1px solid ${col}88" title="${(rx.summary||'').replace(/"/g,'&quot;')}">${rx.badge_label}</span>`;
+};
+
+function scoreSymbol(sym, mtf, sent){
+  const rxAll = {}; for(const k of Object.keys(mtf)) if(mtf[k]) rxAll[k] = reactionEngine(mtf[k], null, sent);
+  const rxKey = mtf['1h'] ? '1h' : (mtf['15m'] ? '15m' : Object.keys(mtf)[0]);
+  const rx = rxAll[rxKey] || null;
   const p = mtf['1h'] || mtf['15m']; if(!p) return null;
   const biases = {}; for(const k of Object.keys(mtf)) if(mtf[k]) biases[k]=mtf[k].bias;
   const evalSide = (isLong) => {
@@ -394,7 +556,9 @@ function scoreSymbol(sym, mtf){
     symbol:sym, price:tk.price||p.cur, chg:tk.chg||0, vol:tk.vol||0,
     biases, long_tech:L.tech, short_tech:S.tech, long_opp:L.opp, short_opp:S.opp,
     long_rr:L.rr, short_rr:S.rr, status, side, longPlan:L, shortPlan:S,
-    early:early.length>0, earlyReasons:early, plan, mtf
+    early:early.length>0, earlyReasons:early, plan, mtf,
+    reaction:rx, reactionByTf:rxAll,
+    reaction_state: rx?rx.state:'MID_RANGE_WAIT', reaction_label: rx?rx.badge_label:'MID-RANGE', reaction_summary: rx?rx.summary:''
   };
 }
 
@@ -438,6 +602,7 @@ async function scanAll(){
             const lim = tf==='1d' ? 99 : 220;
             const kl = await fetchKlinesSmart(sym, tf, lim, false);
             if(kl) mtf[tf] = analyzeCandles(kl);
+            if(mtf[tf]) mtf[tf].__tf = tf.toUpperCase();
           }catch{}
         }));
         const sc = scoreSymbol(sym, mtf);
@@ -500,6 +665,7 @@ function renderAll(){
       <td class="mono ${r.chg>=0?'bull':'bear'}">${r.chg>=0?'+':''}${r.chg.toFixed(2)}%</td>
       <td>${scoreHtml(r.long_opp,true)}</td><td>${scoreHtml(r.short_opp,false)}</td>
       <td>${badgeHtml(r.status,r.early)}</td>
+      <td>${rxBadgeHtml(r.reaction)}</td>
     </tr>`).join('');
 
   const earlyArr = arr.filter(x=>x.early);
@@ -513,14 +679,19 @@ function renderAll(){
   const q = document.getElementById('qSearch').value.trim().toUpperCase();
   const sort = document.getElementById('qSort').value;
   const eo = document.getElementById('qEarly').checked;
+  const rxF = document.getElementById('qReaction') ? document.getElementById('qReaction').value : 'ALL';
+  const rxMatch = (st) => rxF==='ALL' ? true
+    : rxF==='REVERSAL_ANY' ? (st==='BULLISH_REVERSAL_ZONE'||st==='BEARISH_REVERSAL_ZONE')
+    : rxF==='ACTIONABLE_NOW' ? ['BOUNCE_ZONE','BULLISH_REVERSAL_ZONE','BEARISH_REVERSAL_ZONE','PULLBACK_DUE'].includes(st)
+    : st===rxF;
   const fullList = [...arr];
   for(const sym of state.contracts){
     if(!state.results.has(sym)){
       const tk = state.tickers.get(sym) || {price:0,chg:0,vol:0};
-      fullList.push({ symbol:sym, price:tk.price, chg:tk.chg, vol:tk.vol, biases:{}, long_tech:0, short_tech:0, long_opp:0, short_opp:0, status:'SCANNING', early:false });
+      fullList.push({ symbol:sym, price:tk.price, chg:tk.chg, vol:tk.vol, biases:{}, long_tech:0, short_tech:0, long_opp:0, short_opp:0, status:'SCANNING', early:false, reaction_state:'SCANNING', reaction:null });
     }
   }
-  let rows = fullList.filter(r => (!q || r.symbol.includes(q)) && (!eo || r.early));
+  let rows = fullList.filter(r => (!q || r.symbol.includes(q)) && (!eo || r.early) && rxMatch(r.reaction_state||'MID_RANGE_WAIT'));
   rows.sort((a,b)=> sort==='long_tech'?(b.long_tech-a.long_tech || b.vol-a.vol) : sort==='short_tech'?(b.short_tech-a.short_tech || b.vol-a.vol) : sort==='vol'?b.vol-a.vol : (Math.max(b.long_opp,b.short_opp)-Math.max(a.long_opp,a.short_opp) || b.vol-a.vol));
   document.getElementById('scanBody').innerHTML = rows.map(r=>`
     <tr class="click" onclick="openCoin('${r.symbol}')">
@@ -535,6 +706,7 @@ function renderAll(){
       <td>${scoreHtml(r.long_tech,true)}</td><td>${scoreHtml(r.short_tech,false)}</td>
       <td>${scoreHtml(r.long_opp,true)}</td><td>${scoreHtml(r.short_opp,false)}</td>
       <td>${badgeHtml(r.status,r.early)}</td>
+      <td>${rxBadgeHtml(r.reaction)}</td>
     </tr>`).join('');
 
   // Top Opps (strictly separated by active side so SHORT CONFIRMED never shows a LONG plan)
@@ -550,6 +722,7 @@ function renderAll(){
   }).join('');
 }
 
+document.addEventListener('change', e => { if(e.target && (e.target.id==='qReaction'||e.target.id==='qEarly')) renderAll(); });
 window.toggleW = sym => { state.watch.has(sym)?state.watch.delete(sym):state.watch.add(sym); localStorage.setItem('bn_watch',JSON.stringify([...state.watch])); renderAll(); };
 window.openCoin = (sym, side=null) => {
   const clean = (sym||'').trim().toUpperCase();
@@ -587,7 +760,9 @@ async function loadCoinChart(){
     priorityInFlight = Math.max(0, priorityInFlight - 1);
   }
   if(mySeq !== loadSeq) return;
+  state.lastSenti = null; // never carry another coin's funding into this reaction read
   const d = analyzeCandles(kl);
+  if(d) d.__tf = tf.toUpperCase();
   if(!d){
     document.getElementById('coinPrice').textContent = 'Unavailable';
     document.getElementById('plainEnglishBody').innerHTML = `<div class="muted">Could not load klines for <b>${sym}</b> (${tf.toUpperCase()}). Click Rescan or select another symbol.</div>`;
@@ -601,7 +776,7 @@ async function loadCoinChart(){
       await Promise.all(['15m','1h','4h','1d'].map(async k=>{
         try{
           const kkl = await fetchKlinesSmart(sym, k, k==='1d'?99:220, true);
-          if(kkl) mtfNow[k] = analyzeCandles(kkl);
+          if(kkl){ mtfNow[k] = analyzeCandles(kkl); if(mtfNow[k]) mtfNow[k].__tf = k.toUpperCase(); }
         }catch{}
       }));
       sum = scoreSymbol(sym, mtfNow);
@@ -660,6 +835,7 @@ async function loadCoinChart(){
       ]);
       if(pr){
         const fr = +(parseFloat(pr.lastFundingRate||'0')*100).toFixed(4);
+        state.lastSenti = { fundingRatePct: fr };
         const oiUsd = oi ? parseFloat(oi.openInterest||'0')*d.cur : 0;
         const rl = Array.isArray(gls)&&gls[0] ? +(parseFloat(gls[0].longAccount||'0')*100).toFixed(1) : null;
         const wl = Array.isArray(tls)&&tls[0] ? +(parseFloat(tls[0].longAccount||'0')*100).toFixed(1) : null;
@@ -675,6 +851,35 @@ async function loadCoinChart(){
     : (stName.includes('WATCH') || sum?.early)
     ? `<b>${sym}</b> is on <b>EARLY / ${stName}</b> at <b>${fmtP(d.cur)}</b> — approaching a key Order Block or volume expansion zone before a conventional breakout.`
     : `<b>${sym}</b> currently shows <b>NO ACTIONABLE SETUP</b> at <b>${fmtP(d.cur)}</b> (Long Tech: ${sum?.long_tech??0}/100 vs Short Tech: ${sum?.short_tech??0}/100) — stand aside until price reaches a clean structural zone.`;
+  // ---------- Pre-Indicator Price-Action Reaction Radar ----------
+  const rx = reactionEngine(d, sum ? sum.biases : {}, state.lastSenti || null);
+  const rxPanel = document.getElementById('rxRadarPanel');
+  const zCard = (z, kind) => !z
+    ? `<div style="border-radius:7px;padding:9px 11px;font-size:12px;background:rgba(100,116,139,.08);border:1px solid rgba(148,163,184,.25)"><b>${kind==='bounce'?'Demand / Bounce Wall Below':'Supply / Rejection Wall Above'}</b><div class="muted">No clean zone within 6 ATR.</div></div>`
+    : `<div style="border-radius:7px;padding:9px 11px;font-size:12px;line-height:1.5;background:${kind==='bounce'?'rgba(16,185,129,.07)':'rgba(244,63,94,.07)'};border:1px solid ${kind==='bounce'?'rgba(16,185,129,.32)':'rgba(244,63,94,.32)'}">
+        <b>${kind==='bounce'?'Demand / Bounce Wall Below':'Supply / Rejection Wall Above'}</b>
+        <div><b>${z.label}</b> · ${fmtP(z.low)} – ${fmtP(z.high)} (${z.distance_atr} ATR)${z.in_zone?' <b class="bull">— PRICE IS IN ZONE</b>':''}</div>
+        <div class="muted mono">Hard invalidation ${fmtP(z.invalidation)} (0.25 ATR beyond zone) → Reaction target ${fmtP(z.target_1)}</div>
+      </div>`;
+  if(rxPanel){
+    rxPanel.style.display = 'block';
+    rxPanel.innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center;margin-bottom:7px">
+        <div>
+          <div style="font-size:10.5px;font-weight:800;letter-spacing:.06em;color:#a855f7">PRE-INDICATOR PRICE-ACTION REACTION RADAR</div>
+          <div style="font-size:13.5px;font-weight:700;color:#f8fafc">${rxBadgeHtml(rx)} <span class="muted" style="font-size:12px">Range position ${rx.range_position_pct.toFixed(0)}% • EMA20 stretch ${rx.ema20_stretch_atr>=0?'+':''}${rx.ema20_stretch_atr.toFixed(2)} ATR</span></div>
+        </div>
+        <span class="muted" style="font-size:11.5px">Fires BEFORE EMA/MACD/RSI flip • closed candles only</span>
+      </div>
+      <div style="font-size:12.7px;line-height:1.55;color:#e2e8f0;margin-bottom:9px">${rx.summary}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:9px;margin-bottom:9px">${zCard(rx.bounce_zone,'bounce')}${zCard(rx.rejection_zone,'reject')}</div>
+      <ul style="margin:0 0 9px;padding-left:18px;color:#cbd5e1;font-size:12.2px;line-height:1.55">${rx.why_before_indicators.map(x=>`<li>${x}</li>`).join('')}</ul>
+      <div style="padding:8px 11px;border-radius:7px;background:rgba(56,189,248,.07);border:1px solid rgba(56,189,248,.25);font-size:12.2px;line-height:1.55;color:#e2e8f0;display:flex;flex-direction:column;gap:5px">
+        <span>${rx.aggressive_trigger}</span><span>${rx.conservative_trigger}</span>
+        <span class="muted" style="font-size:11.5px">This radar is NOT a trade signal — it never upgrades a setup to CONFIRMED. Candle-close confirmation still gates every entry.</span>
+      </div>`;
+  }
+
   document.getElementById('plainEnglishBody').innerHTML = `
     <div style="padding:11px 14px;border-radius:8px;background:rgba(56,189,248,.09);border-left:4px solid var(--accent);color:#f1f5f9;margin-bottom:12px;line-height:1.5">${verdict}</div>
     <div style="background:rgba(30,41,59,.72);border:1px solid rgba(56,189,248,.32);border-radius:9px;padding:13px 15px;margin-bottom:12px">

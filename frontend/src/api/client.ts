@@ -67,6 +67,10 @@ export interface ScanRow {
   status: string;
   early_watch: boolean;
   early_reasons: string[];
+  reaction_state?: string;
+  reaction_label?: string;
+  reaction_lean?: string;
+  reaction_summary?: string;
   entry_zone?: [number, number] | null;
   entry?: number | null;
   invalidation?: number | null;
@@ -119,12 +123,37 @@ export interface ExplanationSection {
   bullets: string[];
 }
 
+export interface ReactionZoneSpec {
+  label: string;
+  low: number;
+  high: number;
+  in_zone: boolean;
+  distance_atr: number;
+  invalidation: number;
+  target_1: number;
+}
+
+export interface PreIndicatorRadar {
+  state: 'BOUNCE_ZONE' | 'PULLBACK_DUE' | 'BULLISH_REVERSAL_ZONE' | 'BEARISH_REVERSAL_ZONE' | 'MID_RANGE_WAIT' | string;
+  badge_label: string;
+  bias_lean: 'BULLISH_REACTION' | 'BEARISH_REACTION' | 'NEUTRAL_WAIT' | string;
+  range_position_pct: number;
+  ema20_stretch_atr: number;
+  summary: string;
+  why_before_indicators: string[];
+  bounce_zone: ReactionZoneSpec | null;
+  rejection_zone: ReactionZoneSpec | null;
+  aggressive_trigger: string;
+  conservative_trigger: string;
+}
+
 export interface ExplanationReport {
   symbol: string;
   tf: string;
   tone: 'bullish' | 'bearish' | 'warning' | 'neutral';
   headline: string;
   next_move_map?: NextMoveMap;
+  pre_indicator_radar?: PreIndicatorRadar;
   sections: ExplanationSection[];
 }
 

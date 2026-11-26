@@ -249,3 +249,34 @@ html, body, #root {
 .form-grid label, .form-stack label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
 .form-stack { display: flex; flex-direction: column; gap: 12px; }
 .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
+
+/* Pre-Indicator Price-Action Reaction Badges & Radar */
+.badge.rx-bounce { background: rgba(16,185,129,0.2); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.5); }
+.badge.rx-bull-rev { background: rgba(168,85,247,0.22); color: #e9d5ff; border: 1px solid rgba(168,85,247,0.55); }
+.badge.rx-bear-rev { background: rgba(244,63,94,0.22); color: #fecdd3; border: 1px solid rgba(244,63,94,0.55); }
+.badge.rx-pullback { background: rgba(245,158,11,0.2); color: #fde68a; border: 1px solid rgba(245,158,11,0.5); }
+.badge.rx-mid { background: rgba(100,116,139,0.16); color: #94a3b8; border: 1px solid rgba(148,163,184,0.25); }
+
+.rx-radar-box {
+  background: linear-gradient(180deg, rgba(15,23,42,0.92), rgba(15,23,42,0.72));
+  border: 1px solid rgba(168,85,247,0.38);
+  border-radius: 9px;
+  padding: 13px 15px;
+  margin-bottom: 14px;
+}
+.rx-radar-head {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px;
+}
+.rx-zones-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin: 10px 0;
+}
+.rx-zone-card {
+  border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.5;
+}
+.rx-zone-card.bounce { background: rgba(16,185,129,0.07); border: 1px solid rgba(16,185,129,0.32); }
+.rx-zone-card.reject { background: rgba(244,63,94,0.07); border: 1px solid rgba(244,63,94,0.32); }
+.rx-exec-strip {
+  margin-top: 8px; padding: 9px 12px; border-radius: 7px; font-size: 12.3px; line-height: 1.55;
+  background: rgba(56,189,248,0.07); border: 1px solid rgba(56,189,248,0.25); color: #e2e8f0;
+  display: flex; flex-direction: column; gap: 5px;
+}

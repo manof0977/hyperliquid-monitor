@@ -97,6 +97,7 @@ async def api_bridge_sentiment(body: BridgeSentimentBody):
 async def api_scanner(
     search: str = "",
     status: str = "ALL",
+    reaction: str = "ALL",
     early_only: bool = False,
     min_score: float = 0.0,
     sort_by: str = "long_opp",
@@ -121,6 +122,10 @@ async def api_scanner(
                 "long_opp_score": 0.0,
                 "short_opp_score": 0.0,
                 "status": "SCANNING",
+                "reaction_state": "SCANNING",
+                "reaction_label": "SCANNING",
+                "reaction_lean": "NEUTRAL_WAIT",
+                "reaction_summary": "",
                 "early_watch": False,
                 "early_reasons": [],
             })
@@ -129,6 +134,16 @@ async def api_scanner(
         rows = [r for r in rows if q in r["symbol"]]
     if status and status != "ALL":
         rows = [r for r in rows if r["status"] == status]
+    if reaction and reaction != "ALL":
+        if reaction == "REVERSAL_ANY":
+            rows = [r for r in rows if r.get("reaction_state") in ("BULLISH_REVERSAL_ZONE", "BEARISH_REVERSAL_ZONE")]
+        elif reaction == "ACTIONABLE_NOW":
+            rows = [
+                r for r in rows
+                if r.get("reaction_state") in ("BOUNCE_ZONE", "BULLISH_REVERSAL_ZONE", "BEARISH_REVERSAL_ZONE", "PULLBACK_DUE")
+            ]
+        else:
+            rows = [r for r in rows if r.get("reaction_state") == reaction]
     if early_only:
         rows = [r for r in rows if r.get("early_watch")]
     if min_score > 0:

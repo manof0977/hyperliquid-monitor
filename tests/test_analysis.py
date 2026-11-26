@@ -248,3 +248,116 @@ def test_concurrent_coin_switching_and_bridge_ingest_no_sqlite_lock(tmp_path, mo
     asyncio.run(_run())
 
 
+
+
+# ---------------------------------------------------------------------------
+# Pre-Indicator Price-Action Reaction Engine
+# ---------------------------------------------------------------------------
+from app.analysis.reaction import classify_pre_indicator_reaction   # noqa: E402
+
+
+def _empty_detail(n_bars: int = 120) -> dict:
+    return {
+        "n_bars": n_bars,
+        "ind": {"close": 100.0, "atr14": 1.0, "ema20": 100.0, "ema_stack": "mixed"},
+        "structure": {"trend": "neutral", "last_swing_high": None, "last_swing_low": None},
+        "smc": {"order_blocks": [], "fvgs": [], "sweeps": [], "dealing_range": None},
+        "sr": {"supports": [], "resistances": [], "pdh": None, "pdl": None, "pwh": None, "pwl": None,
+               "nearest_support": None, "nearest_resistance": None},
+        "div": {},
+    }
+
+
+def test_reaction_handles_missing_detail():
+    rx = classify_pre_indicator_reaction(None)
+    assert rx["state"] == "MID_RANGE_WAIT"
+    assert rx["bias_lean"] == "NEUTRAL_WAIT"
+
+
+def test_reaction_mid_range_when_no_zones():
+    rx = classify_pre_indicator_reaction(_empty_detail())
+    assert rx["state"] == "MID_RANGE_WAIT"
+    assert rx["bounce_zone"] is None and rx["rejection_zone"] is None
+    assert "Mid-Range" in rx["summary"]
+    assert rx["why_before_indicators"]
+
+
+def test_reaction_bounce_zone_inside_demand_ob():
+    d = _empty_detail()
+    d["ind"].update({"close": 99.8, "atr14": 1.0, "ema20": 101.5, "ema_stack": "bullish",
+                     "closed_lower_wick_pct": 52.0, "vol_ratio": 1.6})
+    d["structure"]["trend"] = "bullish"
+    d["smc"]["order_blocks"] = [{"kind": "bullish", "top": 100.2, "bottom": 99.2, "mitigated": False}]
+    d["smc"]["dealing_range"] = {"high": 110.0, "low": 95.0, "eq": 102.5, "position": 0.32}
+    rx = classify_pre_indicator_reaction(d, biases={"4h": "BULLISH"}, tf_label="1H")
+    assert rx["state"] == "BOUNCE_ZONE"
+    assert rx["bias_lean"] == "BULLISH_REACTION"
+    assert rx["bounce_zone"]["in_zone"] is True
+    # Invalidation must sit structurally BELOW the zone, target strictly ABOVE it
+    assert rx["bounce_zone"]["invalidation"] < rx["bounce_zone"]["low"]
+    assert rx["bounce_zone"]["target_1"] > rx["bounce_zone"]["high"]
+    assert round(rx["bounce_zone"]["low"] - rx["bounce_zone"]["invalidation"], 6) == 0.25
+
+
+def test_reaction_pullback_due_on_atr_stretch_into_supply():
+    d = _empty_detail()
+    d["ind"].update({"close": 104.0, "atr14": 1.0, "ema20": 100.0, "ema_stack": "bullish",
+                     "ema20_stretch_atr": 4.0, "consec_bull_bars": 5, "closed_upper_wick_pct": 41.0})
+    d["structure"]["trend"] = "bullish"
+    d["smc"]["order_blocks"] = [{"kind": "bearish", "top": 104.4, "bottom": 103.6, "mitigated": False}]
+    d["smc"]["dealing_range"] = {"high": 105.0, "low": 95.0, "eq": 100.0, "position": 0.9}
+    rx = classify_pre_indicator_reaction(d, tf_label="1H")
+    assert rx["state"] == "PULLBACK_DUE"
+    assert rx["bias_lean"] == "BEARISH_REACTION"
+    assert rx["rejection_zone"]["in_zone"] is True
+    assert rx["rejection_zone"]["invalidation"] > rx["rejection_zone"]["high"]
+    assert rx["rejection_zone"]["target_1"] < rx["rejection_zone"]["low"]
+    assert "Pullback" in rx["summary"]
+
+
+def test_reaction_bottom_reversal_on_liquidity_sweep():
+    d = _empty_detail()
+    d["ind"].update({"close": 97.6, "atr14": 1.0, "ema20": 100.4, "ema_stack": "bearish",
+                     "closed_lower_wick_pct": 58.0, "vol_ratio": 2.1})
+    d["structure"]["trend"] = "bearish"
+    d["smc"]["sweeps"] = [{"kind": "bullish", "index": 118, "level": 97.5, "wick": 96.9}]
+    d["smc"]["dealing_range"] = {"high": 104.0, "low": 96.0, "eq": 100.0, "position": 0.2}
+    rx = classify_pre_indicator_reaction(d, tf_label="4H")
+    assert rx["state"] == "BULLISH_REVERSAL_ZONE"
+    assert rx["bias_lean"] == "BULLISH_REACTION"
+    assert "Sell-Side Liquidity Sweep" in " ".join(rx["why_before_indicators"])
+
+
+def test_reaction_top_reversal_on_buy_side_sweep():
+    d = _empty_detail()
+    d["ind"].update({"close": 103.2, "atr14": 1.0, "ema20": 101.0, "ema_stack": "bullish",
+                     "closed_upper_wick_pct": 61.0})
+    d["structure"]["trend"] = "bullish"
+    d["smc"]["sweeps"] = [{"kind": "bearish", "index": 119, "level": 103.0, "wick": 103.9}]
+    d["smc"]["dealing_range"] = {"high": 104.0, "low": 96.0, "eq": 100.0, "position": 0.9}
+    rx = classify_pre_indicator_reaction(d, tf_label="1H")
+    assert rx["state"] == "BEARISH_REVERSAL_ZONE"
+    assert rx["bias_lean"] == "BEARISH_REACTION"
+
+
+def test_reaction_never_repaints_or_invents_levels():
+    """Same input must always give identical output, and all levels must come from the input structure."""
+    d = _empty_detail()
+    d["ind"].update({"close": 99.9, "atr14": 1.0, "ema20": 101.0, "ema_stack": "bullish"})
+    d["structure"]["trend"] = "bullish"
+    d["smc"]["order_blocks"] = [{"kind": "bullish", "top": 100.1, "bottom": 99.1, "mitigated": False}]
+    a = classify_pre_indicator_reaction(d, biases={"1d": "BULLISH"})
+    b = classify_pre_indicator_reaction(d, biases={"1d": "BULLISH"})
+    assert a == b
+    assert a["bounce_zone"]["high"] <= 100.1 and a["bounce_zone"]["low"] >= 99.1
+
+
+def test_reaction_stays_out_of_confirmed_signal_state_machine():
+    """Reaction metadata must never appear in, or mutate, the candle-close CONFIRMED status logic."""
+    df = _make_trend_df(200, direction=1)
+    mtf = {"1h": analyze_timeframe(df), "4h": analyze_timeframe(df), "1d": analyze_timeframe(df)}
+    scored = evaluate_symbol(mtf)
+    assert "reaction_state" in scored and "reaction_lean" in scored
+    # Confirm the pre-indicator radar can't ever emit a CONFIRMED status string
+    assert "CONFIRMED" not in scored["reaction_label"]
+    assert "CONFIRMED" not in scored["reaction_state"]

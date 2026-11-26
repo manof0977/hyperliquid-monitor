@@ -31,3 +31,19 @@ export const ScoreCell: React.FC<{ value: number; side: 'long' | 'short' }> = ({
     </div>
   );
 };
+
+export const ReactionBadge: React.FC<{ state?: string; label?: string; title?: string }> = ({ state, label, title }) => {
+  const st = state || 'MID_RANGE_WAIT';
+  const txt = label || (st === 'MID_RANGE_WAIT' ? 'MID-RANGE' : st);
+  let cls = 'badge rx-mid';
+  if (st === 'BOUNCE_ZONE') cls = 'badge rx-bounce';
+  else if (st === 'BULLISH_REVERSAL_ZONE') cls = 'badge rx-bull-rev';
+  else if (st === 'BEARISH_REVERSAL_ZONE') cls = 'badge rx-bear-rev';
+  else if (st === 'PULLBACK_DUE') cls = 'badge rx-pullback';
+  else if (st === 'SCANNING') cls = 'badge none';
+  return (
+    <span className={cls} title={title || txt}>
+      {txt}
+    </span>
+  );
+};
