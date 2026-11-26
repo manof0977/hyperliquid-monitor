@@ -138,10 +138,11 @@ def _tech_score_side(side: str, primary: dict, biases: dict[str, str]) -> tuple[
     }
 
 
-def _build_trade_plan(side: str, primary: dict, ltf: dict | None) -> dict:
+def _build_trade_plan(side: str, primary: dict, ltf: dict | None, primary_tf: str = "1h") -> dict:
     """Construct structural entry zone, invalidation & 3 structural targets + Opportunity Score."""
     is_long = side == "LONG"
     target_dir = "bullish" if is_long else "bearish"
+    tf_lbl = primary_tf.upper()
     ind = primary["ind"]
     st = primary["structure"]
     smc = primary["smc"]
@@ -149,75 +150,106 @@ def _build_trade_plan(side: str, primary: dict, ltf: dict | None) -> dict:
     cur = ind["close"]
     atr = max(ind.get("atr14", cur * 0.01), 1e-8)
 
-    # Candidate entry zones: active OBs and FVGs on right side of price (or currently containing price)
-    zones: list[tuple[float, float, str]] = []
+    # Candidate entry zones: ONLY unviolated zones containing current price OR sitting on the pullback side
+    # LONG -> Demand zone containing price OR below price (top <= cur)
+    # SHORT -> Supply zone containing price OR above price (bottom >= cur)
+    zones: list[tuple[float, float, str, str]] = []
     for ob in smc["order_blocks"]:
         if ob["kind"] == target_dir:
-            if (is_long and ob["bottom"] <= cur * 1.005) or (not is_long and ob["top"] >= cur * 0.995):
-                zones.append((ob["bottom"], ob["top"], "OB"))
+            contains = ob["bottom"] <= cur <= ob["top"]
+            valid_pullback = (ob["top"] <= cur) if is_long else (ob["bottom"] >= cur)
+            if contains or valid_pullback:
+                zones.append((ob["bottom"], ob["top"], "OB", f"{tf_lbl} {'Bullish Demand' if is_long else 'Bearish Supply'} Order Block ({ob['break_kind']})"))
     for g in smc["fvgs"]:
         if g["kind"] == target_dir:
-            if (is_long and g["bottom"] <= cur * 1.005) or (not is_long and g["top"] >= cur * 0.995):
-                zones.append((g["bottom"], g["top"], "FVG"))
+            contains = g["bottom"] <= cur <= g["top"]
+            valid_pullback = (g["top"] <= cur) if is_long else (g["bottom"] >= cur)
+            if contains or valid_pullback:
+                zones.append((g["bottom"], g["top"], "FVG", f"{tf_lbl} {'Bullish' if is_long else 'Bearish'} Fair Value Gap (3-bar imbalance)"))
     if not zones:
-        if is_long and sr.get("nearest_support"):
-            p = sr["nearest_support"]["price"]
-            zones.append((p - 0.25 * atr, p + 0.25 * atr, "SR"))
-        elif not is_long and sr.get("nearest_resistance"):
-            p = sr["nearest_resistance"]["price"]
-            zones.append((p - 0.25 * atr, p + 0.25 * atr, "SR"))
+        if is_long and sr.get("nearest_support") and sr["nearest_support"]["price"] <= cur:
+            ns = sr["nearest_support"]
+            p = ns["price"]
+            zones.append((p - 0.25 * atr, min(cur, p + 0.20 * atr), "SR", f"{tf_lbl} Support Cluster ({ns['source']}, {ns.get('touches', 1)} touches)"))
+        elif not is_long and sr.get("nearest_resistance") and sr["nearest_resistance"]["price"] >= cur:
+            nr = sr["nearest_resistance"]
+            p = nr["price"]
+            zones.append((max(cur, p - 0.20 * atr), p + 0.25 * atr, "SR", f"{tf_lbl} Resistance Cluster ({nr['source']}, {nr.get('touches', 1)} touches)"))
 
     if not zones:
         return {
             "opportunity_score": 0.0, "opp_breakdown": {}, "has_plan": False,
             "entry_zone": None, "entry": None, "invalidation": None,
-            "targets": [], "rr": 0.0, "in_zone": False, "ltf_confirmed": False,
+            "targets": [], "target_details": [], "rr": 0.0, "in_zone": False, "ltf_confirmed": False,
+            "order_type": None, "entry_reason": None, "invalidation_reason": None,
         }
 
-    # Pick zone closest to current price
-    zones.sort(key=lambda z: min(abs(cur - z[0]), abs(cur - z[1]), 0 if z[0] <= cur <= z[1] else 1e18))
-    z_low, z_high, z_src = zones[0]
+    # Pick zone closest to current price (zones containing price have distance 0)
+    zones.sort(key=lambda z: 0.0 if (z[0] <= cur <= z[1]) else min(abs(cur - z[0]), abs(cur - z[1])))
+    z_low, z_high, z_src, z_desc = zones[0]
     in_zone = z_low <= cur <= z_high
     suggested_entry = cur if in_zone else (z_high if is_long else z_low)
+    order_type = (
+        f"In-Zone {side} (price is currently inside {z_src})"
+        if in_zone
+        else (f"Limit BUY on pullback to {z_src} top" if is_long else f"Limit SELL on rally into {z_src} base")
+    )
 
     # Structural invalidation: beyond zone & beyond nearest swing extreme (buffer 0.25 ATR)
     if is_long:
-        sl_struct = st["last_swing_low"]["price"] if st.get("last_swing_low") else z_low
+        sl_node = st.get("last_swing_low")
+        sl_struct = sl_node["price"] if (sl_node and sl_node["price"] <= z_high) else z_low
+        anchor_lbl = f"{tf_lbl} Swing Low ({sl_node['label']})" if (sl_node and sl_struct < z_low) else f"{z_src} bottom"
         invalidation = min(z_low, sl_struct) - 0.25 * atr
         if invalidation >= suggested_entry:
             invalidation = z_low - 0.5 * atr
+        inv_reason = f"0.25 ATR below {anchor_lbl}"
     else:
-        sh_struct = st["last_swing_high"]["price"] if st.get("last_swing_high") else z_high
+        sh_node = st.get("last_swing_high")
+        sh_struct = sh_node["price"] if (sh_node and sh_node["price"] >= z_low) else z_high
+        anchor_lbl = f"{tf_lbl} Swing High ({sh_node['label']})" if (sh_node and sh_struct > z_high) else f"{z_src} top"
         invalidation = max(z_high, sh_struct) + 0.25 * atr
         if invalidation <= suggested_entry:
             invalidation = z_high + 0.5 * atr
+        inv_reason = f"0.25 ATR above {anchor_lbl}"
 
     risk = abs(suggested_entry - invalidation)
 
     # Structural targets from opposing SR levels, PDH/PDL, PWH/PWL, dealing range extreme, opposing OBs
-    cand_targets: list[float] = []
+    cand_targets: list[tuple[float, str]] = []
     if is_long:
-        cand_targets += [r["price"] for r in sr.get("resistances", []) if r["price"] > suggested_entry + 0.3 * atr]
-        if smc.get("dealing_range") and smc["dealing_range"]["high"] > suggested_entry:
-            cand_targets.append(smc["dealing_range"]["high"])
+        for r in sr.get("resistances", []):
+            if r["price"] > suggested_entry + 0.3 * atr:
+                cand_targets.append((r["price"], f"Resistance ({r['source']})"))
+        if smc.get("dealing_range") and smc["dealing_range"]["high"] > suggested_entry + 0.3 * atr:
+            cand_targets.append((smc["dealing_range"]["high"], f"{tf_lbl} Dealing Range High"))
         for o in smc["order_blocks"]:
-            if o["kind"] == "bearish" and o["bottom"] > suggested_entry:
-                cand_targets.append(o["bottom"])
-        cand_targets = sorted(set(round(x, 8) for x in cand_targets))
+            if o["kind"] == "bearish" and o["bottom"] > suggested_entry + 0.3 * atr:
+                cand_targets.append((o["bottom"], f"{tf_lbl} Opposing Bearish Supply OB"))
+        cand_targets.sort(key=lambda x: x[0])
     else:
-        cand_targets += [s["price"] for s in sr.get("supports", []) if s["price"] < suggested_entry - 0.3 * atr]
-        if smc.get("dealing_range") and smc["dealing_range"]["low"] < suggested_entry:
-            cand_targets.append(smc["dealing_range"]["low"])
+        for s in sr.get("supports", []):
+            if s["price"] < suggested_entry - 0.3 * atr:
+                cand_targets.append((s["price"], f"Support ({s['source']})"))
+        if smc.get("dealing_range") and smc["dealing_range"]["low"] < suggested_entry - 0.3 * atr:
+            cand_targets.append((smc["dealing_range"]["low"], f"{tf_lbl} Dealing Range Low"))
         for o in smc["order_blocks"]:
-            if o["kind"] == "bullish" and o["top"] < suggested_entry:
-                cand_targets.append(o["top"])
-        cand_targets = sorted(set(round(x, 8) for x in cand_targets), reverse=True)
+            if o["kind"] == "bullish" and o["top"] < suggested_entry - 0.3 * atr:
+                cand_targets.append((o["top"], f"{tf_lbl} Opposing Bullish Demand OB"))
+        cand_targets.sort(key=lambda x: x[0], reverse=True)
 
     # Deduplicate targets spaced at least 0.4 ATR apart
     targets: list[float] = []
-    for t in cand_targets:
-        if not targets or abs(t - targets[-1]) >= 0.4 * atr:
-            targets.append(t)
+    target_details: list[dict] = []
+    for t_price, t_src in cand_targets:
+        if not targets or abs(t_price - targets[-1]) >= 0.4 * atr:
+            t_round = round(t_price, 8)
+            targets.append(t_round)
+            target_details.append({
+                "price": t_round,
+                "source": t_src,
+                "rr": round(abs(t_price - suggested_entry) / risk, 2) if risk > 0 else 0.0,
+            })
         if len(targets) == 3:
             break
 
@@ -282,10 +314,14 @@ def _build_trade_plan(side: str, primary: dict, ltf: dict | None) -> dict:
             "rr": round(rr_pts, 1), "invalidation": round(inv_pts, 1), "room": round(room_pts, 1),
         },
         "zone_source": z_src,
+        "entry_reason": z_desc,
+        "order_type": order_type,
+        "invalidation_reason": inv_reason,
         "entry_zone": [round(z_low, 8), round(z_high, 8)],
         "entry": round(suggested_entry, 8),
         "invalidation": round(invalidation, 8),
         "targets": [round(t, 8) for t in targets],
+        "target_details": target_details,
         "rr": round(eff_rr, 2),
         "dist_atr": round(dist_atr, 2),
         "in_zone": in_zone,
@@ -340,31 +376,24 @@ def evaluate_symbol(mtf: dict[str, dict], prev_state: dict | None = None) -> dic
     """Combine all available timeframes into independent LONG/SHORT scores, signal status & early watch."""
     biases = {tf: tf_bias(d) for tf, d in mtf.items() if d}
     # Primary execution structure TF = 1h (fallback 4h, 15m); LTF trigger = 15m or 5m
-    primary = mtf.get("1h") or mtf.get("4h") or mtf.get("15m") or next(iter(mtf.values()))
+    primary_tf = "1h" if mtf.get("1h") else ("4h" if mtf.get("4h") else ("15m" if mtf.get("15m") else next(iter(mtf.keys()))))
+    primary = mtf[primary_tf]
     ltf = mtf.get("15m") or mtf.get("5m")
 
     long_tech, long_bd = _tech_score_side("LONG", primary, biases)
     short_tech, short_bd = _tech_score_side("SHORT", primary, biases)
-    long_plan = _build_trade_plan("LONG", primary, ltf)
-    short_plan = _build_trade_plan("SHORT", primary, ltf)
+    long_plan = _build_trade_plan("LONG", primary, ltf, primary_tf=primary_tf)
+    short_plan = _build_trade_plan("SHORT", primary, ltf, primary_tf=primary_tf)
 
     early_reasons = detect_early_watch(primary)
-
-    # Check if previous active setup was invalidated by current price
-    cur = primary["ind"]["close"]
-    if prev_state and prev_state.get("status") in ("LONG CONFIRMED", "LONG DEVELOPING") and prev_state.get("invalidation"):
-        if cur < prev_state["invalidation"]:
-            return _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
-                         "INVALIDATED", "LONG", early_reasons, primary)
-    if prev_state and prev_state.get("status") in ("SHORT CONFIRMED", "SHORT DEVELOPING") and prev_state.get("invalidation"):
-        if cur > prev_state["invalidation"]:
-            return _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
-                         "INVALIDATED", "SHORT", early_reasons, primary)
 
     th = settings.thresholds
 
     def _side_status(side: str, tech: float, plan: dict) -> tuple[str, int]:
         opp = plan["opportunity_score"]
+        has_valid_plan = bool(plan.get("has_plan") and plan.get("entry") and plan.get("invalidation"))
+        if not has_valid_plan:
+            return "NO SETUP", 0
         # Explicit technical confirmation required — high score alone CANNOT confirm
         if (
             tech >= th.developing
@@ -377,33 +406,54 @@ def evaluate_symbol(mtf: dict[str, dict], prev_state: dict | None = None) -> dic
             return f"{side} CONFIRMED", 3
         if tech >= th.developing and opp >= th.developing_min and plan.get("rr", 0) >= 1.2:
             return f"{side} DEVELOPING", 2
-        if (tech >= th.weak and opp >= th.watch_min) or (tech >= th.weak and early_reasons):
+        if (tech >= th.weak and opp >= th.watch_min) or (tech >= th.weak and opp >= 20.0 and early_reasons):
             return f"{side} WATCH", 1
         return "NO SETUP", 0
 
     l_stat, l_rank = _side_status("LONG", long_tech, long_plan)
     s_stat, s_rank = _side_status("SHORT", short_tech, short_plan)
 
+    # Check if previous active setup was invalidated by current price AND no higher-ranked setup took over
+    cur = primary["ind"]["close"]
+    if prev_state and prev_state.get("status") in ("LONG CONFIRMED", "LONG DEVELOPING") and prev_state.get("invalidation"):
+        if cur < prev_state["invalidation"] and s_rank < 2:
+            return _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
+                         "INVALIDATED", "LONG", l_stat, s_stat, early_reasons, primary, primary_tf)
+    if prev_state and prev_state.get("status") in ("SHORT CONFIRMED", "SHORT DEVELOPING") and prev_state.get("invalidation"):
+        if cur > prev_state["invalidation"] and l_rank < 2:
+            return _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
+                         "INVALIDATED", "SHORT", l_stat, s_stat, early_reasons, primary, primary_tf)
+
     if l_rank > s_rank or (l_rank == s_rank and l_rank > 0 and (long_tech + long_plan["opportunity_score"]) >= (short_tech + short_plan["opportunity_score"])):
         status, active_side = l_stat, "LONG"
     elif s_rank > 0:
         status, active_side = s_stat, "SHORT"
     else:
-        status, active_side = "NO SETUP", ("LONG" if long_tech >= short_tech else "SHORT")
+        pick_long = (long_tech + long_plan["opportunity_score"]) >= (short_tech + short_plan["opportunity_score"])
+        status, active_side = "NO SETUP", ("LONG" if pick_long else "SHORT")
+
+    # Hard invariant: status prefix and active_side can NEVER disagree
+    if status.startswith("SHORT"):
+        active_side = "SHORT"
+    elif status.startswith("LONG"):
+        active_side = "LONG"
 
     return _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
-                 status, active_side, early_reasons, primary)
+                 status, active_side, l_stat, s_stat, early_reasons, primary, primary_tf)
 
 
 def _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_plan,
-          status, active_side, early_reasons, primary) -> dict:
+          status, active_side, long_status, short_status, early_reasons, primary, primary_tf="1h") -> dict:
     active_plan = long_plan if active_side == "LONG" else short_plan
     return {
+        "primary_tf": primary_tf,
         "biases": biases,
         "long_tech_score": long_tech,
         "short_tech_score": short_tech,
         "long_opp_score": long_plan["opportunity_score"],
         "short_opp_score": short_plan["opportunity_score"],
+        "long_status": long_status,
+        "short_status": short_status,
         "long_tier": classify_tier(long_tech),
         "short_tier": classify_tier(short_tech),
         "long_breakdown": long_bd,
@@ -418,6 +468,10 @@ def _pack(biases, long_tech, short_tech, long_bd, short_bd, long_plan, short_pla
         "entry": active_plan.get("entry"),
         "invalidation": active_plan.get("invalidation"),
         "targets": active_plan.get("targets", []),
+        "target_details": active_plan.get("target_details", []),
+        "order_type": active_plan.get("order_type"),
+        "entry_reason": active_plan.get("entry_reason"),
+        "invalidation_reason": active_plan.get("invalidation_reason"),
         "rr": active_plan.get("rr", 0.0),
         "zone": primary["smc"].get("zone", "equilibrium"),
     }

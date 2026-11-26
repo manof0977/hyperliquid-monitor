@@ -153,17 +153,24 @@
           <span id="coinPrice" class="mono" style="font-size:20px;font-weight:800">—</span>
           <span id="coinStatus"></span>
         </div>
-        <div class="tfbar" id="tfBar">
-          <button data-tf="5m">5M</button><button data-tf="15m">15M</button>
-          <button data-tf="1h" class="active">1H</button><button data-tf="4h">4H</button>
-          <button data-tf="1d">1D</button><button data-tf="1w">1W</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <div class="tfbar" id="layoutBar">
+            <button data-ly="1x" class="active">1x Chart</button>
+            <button data-ly="4x">4x Multi-TF</button>
+          </div>
+          <div class="tfbar" id="tfBar">
+            <button data-tf="5m">5M</button><button data-tf="15m">15M</button>
+            <button data-tf="1h" class="active">1H</button><button data-tf="4h">4H</button>
+            <button data-tf="1d">1D</button><button data-tf="1w">1W</button>
+          </div>
         </div>
       </div>
       <div class="analysis-grid">
         <div>
-          <div class="panel" style="padding:8px">
+          <div class="panel" style="padding:8px" id="singleChartWrap">
             <div id="chartStage"><canvas id="overlayCanvas"></canvas></div>
           </div>
+          <div id="mtfGridWrap" class="hide" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:14px"></div>
           <div class="panel" id="plainEnglishPanel">
             <h3 style="margin:0 0 10px">Full Plain-English Technical Breakdown</h3>
             <div id="plainEnglishBody" class="muted">Select a coin to read its full plain-English analysis…</div>
@@ -290,11 +297,11 @@ function scoreSymbol(sym, mtf){
     const agree = Object.values(biases).filter(b=>b===tb).length / Math.max(1,Object.keys(biases).length) * 15;
     const tech = Math.min(100, +(ms + Math.min(25,smc) + Math.min(20,em) + Math.min(15,mom) + agree).toFixed(1));
 
-    // Trade plan from real OB / FVG + structural swing targets
+    // Trade plan from real unviolated OB / FVG on pullback or in-zone side + structural swing targets
     const zones = [...p.obs.filter(x=>x.kind===dir), ...p.fvgs.filter(x=>x.kind===dir)]
-      .filter(z => isLong ? z.bot <= p.cur*1.005 : z.top >= p.cur*0.995);
+      .filter(z => (p.cur>=z.bot&&p.cur<=z.top) || (isLong ? z.top <= p.cur : z.bot >= p.cur));
     if(!zones.length) return { tech, opp:0, rr:0, ez:null, entry:null, inv:null, tgts:[], ltfOk:false, distAtr:99 };
-    zones.sort((a,b)=>Math.min(Math.abs(p.cur-a.top),Math.abs(p.cur-a.bot))-Math.min(Math.abs(p.cur-b.top),Math.abs(p.cur-b.bot)));
+    zones.sort((a,b)=>((p.cur>=a.bot&&p.cur<=a.top)?0:Math.min(Math.abs(p.cur-a.top),Math.abs(p.cur-a.bot)))-((p.cur>=b.bot&&p.cur<=b.top)?0:Math.min(Math.abs(p.cur-b.top),Math.abs(p.cur-b.bot))));
     const z=zones[0], inZ = p.cur>=z.bot && p.cur<=z.top;
     const entry = inZ ? p.cur : (isLong ? z.top : z.bot);
     const inv = isLong ? z.bot - 0.3*p.curAtr : z.top + 0.3*p.curAtr;
@@ -318,18 +325,20 @@ function scoreSymbol(sym, mtf){
   }
   if(p.volRatio>=1.5) early.push(`Volume expansion (${p.volRatio.toFixed(1)}x SMA20)`);
 
-  const sideStat = (nm, x) => (x.tech>=60&&x.opp>=70&&x.ltfOk&&x.distAtr<=0.85&&x.rr>=1.5) ? [`${nm} CONFIRMED`,3]
+  const sideStat = (nm, x) => !x.entry ? ['NO SETUP',0]
+    : (x.tech>=60&&x.opp>=70&&x.ltfOk&&x.distAtr<=0.85&&x.rr>=1.5) ? [`${nm} CONFIRMED`,3]
     : (x.tech>=60&&x.opp>=50&&x.rr>=1.2) ? [`${nm} DEVELOPING`,2]
-    : (x.tech>=40&&(x.opp>=35||early.length)) ? [`${nm} WATCH`,1] : ['NO SETUP',0];
+    : (x.tech>=40&&(x.opp>=35||(x.opp>=20&&early.length))) ? [`${nm} WATCH`,1] : ['NO SETUP',0];
   const [ls,lr]=sideStat('LONG',L), [ss,sr]=sideStat('SHORT',S);
   const pickLong = lr>sr || (lr===sr && (L.tech+L.opp)>=(S.tech+S.opp));
   const status = (lr===0&&sr===0) ? 'NO SETUP' : (pickLong ? ls : ss);
-  const plan = pickLong ? L : S;
+  const side = status.startsWith('SHORT') ? 'SHORT' : status.startsWith('LONG') ? 'LONG' : (pickLong ? 'LONG' : 'SHORT');
+  const plan = side==='LONG' ? L : S;
   const tk = state.tickers.get(sym) || { price:p.cur, chg:0, vol:0 };
   return {
     symbol:sym, price:tk.price||p.cur, chg:tk.chg||0, vol:tk.vol||0,
     biases, long_tech:L.tech, short_tech:S.tech, long_opp:L.opp, short_opp:S.opp,
-    long_rr:L.rr, short_rr:S.rr, status, side:pickLong?'LONG':'SHORT',
+    long_rr:L.rr, short_rr:S.rr, status, side, longPlan:L, shortPlan:S,
     early:early.length>0, earlyReasons:early, plan, mtf
   };
 }
@@ -465,11 +474,11 @@ function renderAll(){
       <td>${badgeHtml(r.status,r.early)}</td>
     </tr>`).join('');
 
-  // Top Opps
-  const longs = arr.filter(x=>x.long_tech>=60&&x.long_opp>=35).sort((a,b)=>(b.long_opp+b.long_tech)-(a.long_opp+a.long_tech)).slice(0,20);
-  const shorts = arr.filter(x=>x.short_tech>=60&&x.short_opp>=35).sort((a,b)=>(b.short_opp+b.short_tech)-(a.short_opp+a.short_tech)).slice(0,20);
-  document.getElementById('oppLong').innerHTML = longs.map((r,i)=>`<tr class="click" onclick="openCoin('${r.symbol}')"><td class="muted">${i+1}</td><td><b>${r.symbol}</b></td><td class="mono">${fmtP(r.price)}</td><td>${scoreHtml(r.long_tech,true)}</td><td>${scoreHtml(r.long_opp,true)}</td><td class="mono">${r.long_rr}R</td><td>${badgeHtml(r.status,r.early)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No qualifying LONG setups ≥ 60 yet.</td></tr>';
-  document.getElementById('oppShort').innerHTML = shorts.map((r,i)=>`<tr class="click" onclick="openCoin('${r.symbol}')"><td class="muted">${i+1}</td><td><b>${r.symbol}</b></td><td class="mono">${fmtP(r.price)}</td><td>${scoreHtml(r.short_tech,false)}</td><td>${scoreHtml(r.short_opp,false)}</td><td class="mono">${r.short_rr}R</td><td>${badgeHtml(r.status,r.early)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No qualifying SHORT setups ≥ 60 yet.</td></tr>';
+  // Top Opps (strictly separated by active side so SHORT CONFIRMED never shows a LONG plan)
+  const longs = arr.filter(x=>x.side==='LONG'&&x.long_tech>=60&&x.long_opp>=35).sort((a,b)=>(b.long_opp+b.long_tech)-(a.long_opp+a.long_tech)).slice(0,20);
+  const shorts = arr.filter(x=>x.side==='SHORT'&&x.short_tech>=60&&x.short_opp>=35).sort((a,b)=>(b.short_opp+b.short_tech)-(a.short_opp+a.short_tech)).slice(0,20);
+  document.getElementById('oppLong').innerHTML = longs.map((r,i)=>`<tr class="click" onclick="openCoin('${r.symbol}','LONG')"><td class="muted">${i+1}</td><td><b>${r.symbol}</b></td><td class="mono">${fmtP(r.price)}</td><td>${scoreHtml(r.long_tech,true)}</td><td>${scoreHtml(r.long_opp,true)}</td><td class="mono">${r.long_rr}R</td><td>${badgeHtml(r.status,r.early)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No qualifying LONG setups ≥ 60 yet.</td></tr>';
+  document.getElementById('oppShort').innerHTML = shorts.map((r,i)=>`<tr class="click" onclick="openCoin('${r.symbol}','SHORT')"><td class="muted">${i+1}</td><td><b>${r.symbol}</b></td><td class="mono">${fmtP(r.price)}</td><td>${scoreHtml(r.short_tech,false)}</td><td>${scoreHtml(r.short_opp,false)}</td><td class="mono">${r.short_rr}R</td><td>${badgeHtml(r.status,r.early)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">No qualifying SHORT setups ≥ 60 yet.</td></tr>';
 
   // Watchlist
   document.getElementById('watchBody').innerHTML = [...state.watch].map(s=>{
@@ -479,7 +488,7 @@ function renderAll(){
 }
 
 window.toggleW = sym => { state.watch.has(sym)?state.watch.delete(sym):state.watch.add(sym); localStorage.setItem('bn_watch',JSON.stringify([...state.watch])); renderAll(); };
-window.openCoin = sym => { state.selectedCoin = sym; switchTab('coin'); loadCoinChart(); };
+window.openCoin = (sym, side=null) => { state.selectedCoin = sym; state.prefSide = side; switchTab('coin'); loadCoinChart(); };
 
 let chartObj = null;
 async function loadCoinChart(){
@@ -499,22 +508,60 @@ async function loadCoinChart(){
   document.getElementById('coinPrice').textContent = fmtP(d.cur);
   document.getElementById('coinStatus').innerHTML = sum ? badgeHtml(sum.status, sum.early) : '';
   document.getElementById('coinBiases').innerHTML = ['1d','4h','1h','15m'].map(k=>`<div style="background:var(--panel2);padding:7px;border-radius:6px;display:flex;justify-content:space-between"><span class="muted">${k.toUpperCase()}</span><span class="pill ${sum?.biases[k]||'NEUTRAL'}">${(sum?.biases[k]||'NEUT').slice(0,4)}</span></div>`).join('');
-  const pl = sum?.plan;
+  const effSide = state.prefSide || (sum?.status?.startsWith('SHORT')?'SHORT':sum?.status?.startsWith('LONG')?'LONG':(sum?.side||'LONG'));
+  const pl = effSide==='SHORT' ? (sum?.shortPlan||sum?.plan) : (sum?.longPlan||sum?.plan);
   document.getElementById('coinPlan').innerHTML = `
-    <div class="kv"><span class="muted">Active Side</span><b>${sum?.side||'—'}</b></div>
-    <div class="kv"><span class="muted">Entry Zone</span><b class="mono">${pl?.ez?`${fmtP(pl.ez[0])} – ${fmtP(pl.ez[1])}`:'—'}</b></div>
+    <div class="kv"><span class="muted">Active Plan Side</span><b class="${effSide==='SHORT'?'bear':'bull'}">${effSide}</b></div>
+    <div class="kv"><span class="muted">Entry Zone (OB/FVG)</span><b class="mono">${pl?.ez?`${fmtP(pl.ez[0])} – ${fmtP(pl.ez[1])}`:'—'}</b></div>
     <div class="kv"><span class="muted">Suggested Entry</span><b class="mono accent">${fmtP(pl?.entry)}</b></div>
-    <div class="kv"><span class="muted">Invalidation (SL)</span><b class="mono bear">${fmtP(pl?.inv)}</b></div>
-    <div class="kv"><span class="muted">Target 1</span><b class="mono bull">${fmtP(pl?.tgts?.[0])}</b></div>
-    <div class="kv"><span class="muted">Target 2</span><b class="mono bull">${fmtP(pl?.tgts?.[1])}</b></div>
+    <div class="kv"><span class="muted">Stop-Loss (${effSide==='SHORT'?'Above':'Below'})</span><b class="mono bear">${fmtP(pl?.inv)}</b></div>
+    <div class="kv"><span class="muted">Target 1 (${effSide==='SHORT'?'▼':'▲'})</span><b class="mono bull">${fmtP(pl?.tgts?.[0])}</b></div>
+    <div class="kv"><span class="muted">Target 2 (${effSide==='SHORT'?'▼':'▲'})</span><b class="mono bull">${fmtP(pl?.tgts?.[1])}</b></div>
     <div class="kv"><span class="muted">Risk / Reward</span><b class="mono">${pl?.rr?pl.rr+'R':'—'}</b></div>
     <div class="kv"><span class="muted">RSI(14) / Trend</span><b class="mono">${d.rsi[d.n-1].toFixed(1)} / ${d.trend.toUpperCase()}</b></div>`;
 
-  // Render Plain-English Breakdown below the chart
-  const tfUp = tf.toUpperCase(), stName = sum?.status || 'NO SETUP', sideName = sum?.side || 'LONG';
+  // Render Plain-English Breakdown + Next-Move Scenario Map below the chart
+  const tfUp = tf.toUpperCase(), stName = sum?.status || 'NO SETUP', sideName = effSide;
   const lastBr = d.breaks[d.breaks.length-1], bullObs = d.obs.filter(o=>o.kind==='bullish'), bearObs = d.obs.filter(o=>o.kind==='bearish');
   const rsiNow = d.rsi[d.n-1], bullTfs = Object.entries(sum?.biases||{}).filter(([,v])=>v==='BULLISH').map(([k])=>k.toUpperCase());
   const bearTfs = Object.entries(sum?.biases||{}).filter(([,v])=>v==='BEARISH').map(([k])=>k.toUpperCase());
+  const bullComb = (sum?.long_tech??50)*0.60 + (sum?.long_opp??50)*0.40;
+  const bearComb = (sum?.short_tech??50)*0.60 + (sum?.short_opp??50)*0.40;
+  const bullWt = Math.round((bullComb / Math.max(bullComb + bearComb, 1)) * 100);
+  const bearWt = 100 - bullWt;
+  const sHighs = d.swings.filter(s=>s.kind==='high'&&s.p>d.cur).sort((a,b)=>a.p-b.p);
+  const sLows = d.swings.filter(s=>s.kind==='low'&&s.p<d.cur).sort((a,b)=>b.p-a.p);
+  const nearRes = sHighs[0]?.p || (bearObs[bearObs.length-1]?.bot);
+  const nearSup = sLows[0]?.p || (bullObs[bullObs.length-1]?.top);
+  const nearFvg = d.fvgs[d.fvgs.length-1];
+  const primaryMagnet = nearFvg
+    ? `Unfilled ${nearFvg.kind} FVG midpoint at ${fmtP((nearFvg.top+nearFvg.bot)/2)}`
+    : nearRes && (!nearSup || Math.abs(nearRes-d.cur) <= Math.abs(d.cur-nearSup))
+    ? `Resting buy-stops above Swing High ${fmtP(nearRes)}`
+    : nearSup ? `Resting sell-stops below Swing Low ${fmtP(nearSup)}` : 'Waiting for fresh swing pool';
+  const bullPathTxt = `Hold above ${nearSup?fmtP(nearSup):'demand support'} and close above ${nearRes?fmtP(nearRes):'local swing high'} to open upside liquidity toward ${sHighs.slice(0,2).map(x=>fmtP(x.p)).join(' → ')||'higher HTF supply'}.`;
+  const bearPathTxt = `Reject below ${nearRes?fmtP(nearRes):'supply cap'} or lose ${nearSup?fmtP(nearSup):'structural support'} on a candle close to draw price toward ${sLows.slice(0,2).map(x=>fmtP(x.p)).join(' → ')||'lower HTF demand'}.`;
+  let sentHtml = '';
+  if(EP?.fut){
+    try {
+      const fOrigin = EP.rest.replace(/\/fapi\/v1$/, '');
+      const per = ['5m','15m','1h','4h','1d'].includes(tf)?tf:'1h';
+      const [pr, oi, gls, tls] = await Promise.all([
+        fetch(`${EP.rest}/premiumIndex?symbol=${sym}`).then(r=>r.ok?r.json():null).catch(()=>null),
+        fetch(`${EP.rest}/openInterest?symbol=${sym}`).then(r=>r.ok?r.json():null).catch(()=>null),
+        fetch(`${fOrigin}/futures/data/globalLongShortAccountRatio?symbol=${sym}&period=${per}&limit=1`).then(r=>r.ok?r.json():null).catch(()=>null),
+        fetch(`${fOrigin}/futures/data/topLongShortPositionRatio?symbol=${sym}&period=${per}&limit=1`).then(r=>r.ok?r.json():null).catch(()=>null),
+      ]);
+      if(pr){
+        const fr = +(parseFloat(pr.lastFundingRate||'0')*100).toFixed(4);
+        const oiUsd = oi ? parseFloat(oi.openInterest||'0')*d.cur : 0;
+        const rl = Array.isArray(gls)&&gls[0] ? +(parseFloat(gls[0].longAccount||'0')*100).toFixed(1) : null;
+        const wl = Array.isArray(tls)&&tls[0] ? +(parseFloat(tls[0].longAccount||'0')*100).toFixed(1) : null;
+        const sqNote = fr>0.03 ? 'Crowded Long Funding — watch for downside stop-hunt.' : fr<-0.015 ? 'Negative Funding (crowded shorts) — elevated short-squeeze fuel.' : (rl&&wl&&rl>=63&&wl<=48) ? 'Retail heavily Long while Top Whales lean Short — fade unconfirmed breakouts.' : (rl&&wl&&rl<=42&&wl>=55) ? 'Top Whales accumulating Longs while Retail shorts — institutional divergence.' : 'Perpetual positioning is balanced without extreme crowding.';
+        sentHtml = `<div style="margin-top:10px;padding:8px 12px;border-radius:7px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);font-size:12px;color:#e2e8f0"><b style="color:#fcd34d">Futures Positioning & Squeeze Read:</b> ${sqNote} <span class="mono muted" style="margin-left:8px">[Funding: ${fr>=0?'+':''}${fr}%${oiUsd?` • OI: ${fmtV(oiUsd)}`:''}${rl!=null?` • Retail L: ${rl}%`:''}${wl!=null?` • Whales L: ${wl}%`:''}]</span></div>`;
+      }
+    } catch {}
+  }
   const verdict = stName.includes('CONFIRMED')
     ? `<b>${sym}</b> has an active <b>${stName}</b> setup at <b>${fmtP(d.cur)}</b> — higher-timeframe structure, entry-zone proximity, lower-timeframe break confirmation, and Risk/Reward all align.`
     : stName.includes('DEVELOPING')
@@ -524,6 +571,21 @@ async function loadCoinChart(){
     : `<b>${sym}</b> currently shows <b>NO ACTIONABLE SETUP</b> at <b>${fmtP(d.cur)}</b> (Long Tech: ${sum?.long_tech??0}/100 vs Short Tech: ${sum?.short_tech??0}/100) — stand aside until price reaches a clean structural zone.`;
   document.getElementById('plainEnglishBody').innerHTML = `
     <div style="padding:11px 14px;border-radius:8px;background:rgba(56,189,248,.09);border-left:4px solid var(--accent);color:#f1f5f9;margin-bottom:12px;line-height:1.5">${verdict}</div>
+    <div style="background:rgba(30,41,59,.72);border:1px solid rgba(56,189,248,.32);border-radius:9px;padding:13px 15px;margin-bottom:12px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center;margin-bottom:9px">
+        <div><div style="font-size:10.5px;font-weight:800;letter-spacing:.06em;color:var(--accent)">WHAT'S LIKELY NEXT — SCENARIO & LIQUIDITY MAGNET MAP</div><b style="font-size:13.5px;color:#f8fafc">Confluence Weight Split: Bullish ${bullWt}% vs Bearish ${bearWt}%</b></div>
+        <div style="background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.35);padding:5px 10px;border-radius:6px;font-size:12px"><span class="muted">#1 Magnet:</span> <b class="mono accent">${primaryMagnet}</b></div>
+      </div>
+      <div style="display:flex;height:20px;border-radius:5px;overflow:hidden;font-size:11px;font-weight:700;margin-bottom:10px">
+        <div style="width:${bullWt}%;background:rgba(16,185,129,.65);color:#ecfdf5;display:flex;align-items:center;padding-left:8px">Bull ${bullWt}%</div>
+        <div style="width:${bearWt}%;background:rgba(239,68,68,.65);color:#fef2f2;display:flex;align-items:center;justify-content:flex-end;padding-right:8px">Bear ${bearWt}%</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;font-size:12.5px;line-height:1.5">
+        <div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.3);border-radius:7px;padding:10px 12px"><b class="bull">▲ Scenario A — Bullish Path</b><p style="margin:4px 0 0;color:#e2e8f0">${bullPathTxt}</p></div>
+        <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:7px;padding:10px 12px"><b class="bear">▼ Scenario B — Bearish Path</b><p style="margin:4px 0 0;color:#e2e8f0">${bearPathTxt}</p></div>
+      </div>
+      ${sentHtml}
+    </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;color:#cbd5e1;line-height:1.55">
       <div style="background:var(--panel2);padding:12px 14px;border-radius:8px;border:1px solid var(--border)">
         <b class="accent">1. Multi-Timeframe Alignment</b>
@@ -540,50 +602,96 @@ async function loadCoinChart(){
       <div style="background:var(--panel2);padding:12px 14px;border-radius:8px;border:1px solid var(--border)">
         <b class="accent">4. ${tfUp} EMAs, Momentum & Step-by-Step Trade Plan</b>
         <p style="margin:6px 0">EMA Stack: <b>${d.bullStack?'BULLISH (20>50>100>200)':d.bearStack?'BEARISH (20<50<100<200)':'MIXED / CONSOLIDATING'}</b> • RSI(14): <b>${rsiNow.toFixed(1)}</b> • Vol: <b>${d.volRatio.toFixed(2)}x SMA20</b>.<br/>
-        ${pl?.ez ? `<b>${sideName} Blueprint:</b> Watch Entry Zone <b>${fmtP(pl.ez[0])} – ${fmtP(pl.ez[1])}</b> (Entry <b>${fmtP(pl.entry)}</b>), hard Invalidation at <b>${fmtP(pl.inv)}</b>, Targets <b>${(pl.tgts||[]).map(fmtP).join(' → ')||'—'}</b> (<b>${pl.rr}R</b>).` : 'No valid structural Entry Zone is near current price right now — wait for fresh displacement.'}</p>
+        ${pl?.ez ? `<b>${sideName} Blueprint:</b> Watch Entry Zone <b>${fmtP(pl.ez[0])} – ${fmtP(pl.ez[1])}</b> (Entry <b>${fmtP(pl.entry)}</b>), hard Invalidation at <b>${fmtP(pl.inv)}</b> (0.3 ATR beyond OB/FVG), Targets <b>${(pl.tgts||[]).map(fmtP).join(' → ')||'—'}</b> (<b>${pl.rr}R</b>).` : 'No valid structural Entry Zone is near current price right now — wait for fresh displacement.'}</p>
       </div>
     </div>`;
 
-  const stage = document.getElementById('chartStage');
+  // Render Single Chart OR 4x Multi-TF Grid (1D, 4H, 1H, 15m) with de-cluttered labels
   if(chartObj){ chartObj.remove(); chartObj = null; }
+  if(window._gridCharts){ window._gridCharts.forEach(c=>c.remove()); window._gridCharts=[]; }
+  const is4x = state.layout === '4x';
+  document.getElementById('singleChartWrap').classList.toggle('hide', is4x);
+  document.getElementById('tfBar').classList.toggle('hide', is4x);
+  const gridEl = document.getElementById('mtfGridWrap');
+  gridEl.classList.toggle('hide', !is4x);
+
+  const buildCleanMarkers = (dd, maxSw=5, maxBr=2) => {
+    const map = new Map();
+    let prevI = -99;
+    for(const s of dd.swings.slice(-maxSw*2)){
+      if(Math.abs(s.i - prevI) < 5) continue;
+      prevI = s.i;
+      const tm = Math.floor(s.t/1000);
+      map.set(tm, { time:tm, position:s.kind==='high'?'aboveBar':'belowBar', color:(s.lbl==='HH'||s.lbl==='HL')?'#22c55e':'#f87171', shape:s.kind==='high'?'arrowDown':'arrowUp', text:s.lbl });
+    }
+    for(const b of dd.breaks.slice(-maxBr)){
+      const tm = Math.floor(b.t/1000);
+      map.set(tm, { time:tm, position:b.dir==='bullish'?'belowBar':'aboveBar', color:b.kind==='CHoCH'?'#fbbf24':'#38bdf8', shape:'circle', text:b.kind });
+    }
+    return [...map.values()].sort((a,b)=>a.time-b.time);
+  };
+
+  if(is4x){
+    gridEl.innerHTML = ['1d','4h','1h','15m'].map(gtf=>`<div class="panel" style="padding:8px"><div style="display:flex;justify-content:space-between;margin-bottom:5px;font-size:12px"><b class="accent">${gtf.toUpperCase()}</b><span class="pill ${sum?.biases[gtf]||'NEUTRAL'}">${(sum?.biases[gtf]||'NEUT').slice(0,4)}</span></div><div id="gstage-${gtf}" style="height:270px;position:relative"></div></div>`).join('');
+    window._gridCharts = [];
+    await Promise.all(['1d','4h','1h','15m'].map(async gtf=>{
+      const gkl = await fetch(`${EP.rest}/klines?symbol=${sym}&interval=${gtf}&limit=${gtf==='1d'?99:200}`).then(r=>r.json()).catch(()=>null);
+      const gd = analyzeCandles(gkl); const el = document.getElementById('gstage-'+gtf);
+      if(!gd || !el) return;
+      const gc = LightweightCharts.createChart(el, { width:el.clientWidth, height:270, layout:{background:{color:'#0b0f17'},textColor:'#94a3b8',fontSize:10}, grid:{vertLines:{color:'rgba(148,163,184,0.04)'},horzLines:{color:'rgba(148,163,184,0.04)'}}, timeScale:{timeVisible:true,rightOffset:5} });
+      window._gridCharts.push(gc);
+      const gcs = gc.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444' });
+      gcs.setData(gd.t.map((tm,i)=>({ time:Math.floor(tm/1000), open:gd.o[i], high:gd.h[i], low:gd.l[i], close:gd.c[i] })));
+      if(gd.n>20) gc.timeScale().setVisibleLogicalRange({ from:Math.max(0,gd.n-65), to:gd.n+4 });
+      [['ema20','rgba(56,189,248,.7)'],['ema50','rgba(245,158,11,.7)']].forEach(([k,col])=>{
+        const ls = gc.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false });
+        ls.setData(gd.t.map((tm,i)=>({ time:Math.floor(tm/1000), value:gd[k][i] })));
+      });
+      gcs.setMarkers(buildCleanMarkers(gd, 3, 1));
+      if(pl?.entry) gcs.createPriceLine({ price:pl.entry, color:'#38bdf8', lineWidth:1, title:effSide[0] });
+      if(pl?.inv) gcs.createPriceLine({ price:pl.inv, color:'#ef4444', lineWidth:1, title:'SL' });
+    }));
+    return;
+  }
+
+  const stage = document.getElementById('chartStage');
   const chart = LightweightCharts.createChart(stage, {
-    width: stage.clientWidth, height: 520,
+    width: stage.clientWidth, height: 500,
     layout:{ background:{ color:'#0b0f17' }, textColor:'#94a3b8' },
-    grid:{ vertLines:{ color:'rgba(148,163,184,0.06)' }, horzLines:{ color:'rgba(148,163,184,0.06)' } },
-    timeScale:{ timeVisible:true }
+    grid:{ vertLines:{ color:'rgba(148,163,184,0.05)' }, horzLines:{ color:'rgba(148,163,184,0.05)' } },
+    timeScale:{ timeVisible:true, rightOffset:6 }
   });
   chartObj = chart;
   const cs = chart.addCandlestickSeries({ upColor:'#10b981', downColor:'#ef4444', borderUpColor:'#10b981', borderDownColor:'#ef4444', wickUpColor:'#10b981', wickDownColor:'#ef4444' });
   cs.setData(d.t.map((tm,i)=>({ time:Math.floor(tm/1000), open:d.o[i], high:d.h[i], low:d.l[i], close:d.c[i] })));
-  [['ema20','#38bdf8'],['ema50','#f59e0b'],['ema100','#a855f7'],['ema200','#e2e8f0']].forEach(([k,col])=>{
+  if(d.n>20) chart.timeScale().setVisibleLogicalRange({ from:Math.max(0,d.n-95), to:d.n+5 });
+  [['ema20','rgba(56,189,248,.75)'],['ema50','rgba(245,158,11,.75)'],['ema200','rgba(226,232,240,.65)']].forEach(([k,col])=>{
     const ls = chart.addLineSeries({ color:col, lineWidth:1, priceLineVisible:false, lastValueVisible:false });
     ls.setData(d.t.map((tm,i)=>({ time:Math.floor(tm/1000), value:d[k][i] })));
   });
-  const markers = [
-    ...d.swings.slice(-20).map(s=>({ time:Math.floor(s.t/1000), position:s.kind==='high'?'aboveBar':'belowBar', color:(s.lbl==='HH'||s.lbl==='HL')?'#22c55e':'#f87171', shape:s.kind==='high'?'arrowDown':'arrowUp', text:s.lbl })),
-    ...d.breaks.slice(-12).map(b=>({ time:Math.floor(b.t/1000), position:b.dir==='bullish'?'belowBar':'aboveBar', color:b.kind==='CHoCH'?'#fbbf24':'#38bdf8', shape:'circle', text:b.kind })),
-    ...d.sweeps.map(w=>({ time:Math.floor(w.t/1000), position:w.kind==='bullish'?'belowBar':'aboveBar', color:'#38bdf8', shape:'square', text:'SWEEP' }))
-  ].sort((a,b)=>a.time-b.time);
-  cs.setMarkers(markers);
-  if(pl?.entry) cs.createPriceLine({ price:pl.entry, color:'#38bdf8', lineWidth:2, title:'ENTRY' });
-  if(pl?.inv) cs.createPriceLine({ price:pl.inv, color:'#ef4444', lineWidth:2, title:'SL' });
-  (pl?.tgts||[]).forEach((tp,i)=>cs.createPriceLine({ price:tp, color:'#10b981', lineWidth:1, lineStyle:2, title:`TP${i+1}` }));
+  cs.setMarkers(buildCleanMarkers(d, 5, 2));
+  if(pl?.entry) cs.createPriceLine({ price:pl.entry, color:'#38bdf8', lineWidth:2, title:`${effSide} ENTRY` });
+  if(pl?.inv) cs.createPriceLine({ price:pl.inv, color:'#ef4444', lineWidth:2, title:'STOP (SL)' });
+  (pl?.tgts||[]).slice(0,2).forEach((tp,i)=>cs.createPriceLine({ price:tp, color:'#10b981', lineWidth:1, lineStyle:2, title:`TP${i+1}` }));
 
   const cvs = document.getElementById('overlayCanvas');
+  const nearObs = [...d.obs].sort((a,b)=>Math.abs((a.top+a.bot)/2-d.cur)-Math.abs((b.top+b.bot)/2-d.cur)).slice(0,3);
+  const nearFvgs = [...d.fvgs].sort((a,b)=>Math.abs((a.top+a.bot)/2-d.cur)-Math.abs((b.top+b.bot)/2-d.cur)).slice(0,2);
   const draw = ()=>{
-    cvs.width = stage.clientWidth; cvs.height = 520;
-    const ctx = cvs.getContext('2d'); ctx.clearRect(0,0,cvs.width,520);
-    const ts = chart.timeScale(), rx = ts.timeToCoordinate(Math.floor(d.t[d.n-1]/1000)) ?? cvs.width-60;
+    cvs.width = stage.clientWidth; cvs.height = 500;
+    const ctx = cvs.getContext('2d'); ctx.clearRect(0,0,cvs.width,500);
+    const ts = chart.timeScale(), rx = Math.min(cvs.width-65, (ts.timeToCoordinate(Math.floor(d.t[d.n-1]/1000)) ?? cvs.width-90)+20);
     const box = (t1,top,bot,fill,str,lbl)=>{
-      const x1=ts.timeToCoordinate(Math.floor(t1/1000))??0, y1=cs.priceToCoordinate(top), y2=cs.priceToCoordinate(bot);
+      const rawX1=ts.timeToCoordinate(Math.floor(t1/1000))??0, x1=Math.max(rawX1, cvs.width*0.28);
+      const y1=cs.priceToCoordinate(top), y2=cs.priceToCoordinate(bot);
       if(y1==null||y2==null) return;
-      const y=Math.min(y1,y2), bh=Math.max(2,Math.abs(y2-y1));
-      ctx.fillStyle=fill; ctx.fillRect(x1,y,Math.max(20,rx-x1),bh);
-      ctx.strokeStyle=str; ctx.strokeRect(x1,y,Math.max(20,rx-x1),bh);
-      ctx.fillStyle=str; ctx.font='10px monospace'; ctx.fillText(lbl,x1+4,y+11);
+      const y=Math.min(y1,y2), bh=Math.max(3,Math.abs(y2-y1)), w=Math.max(24, rx-x1);
+      ctx.fillStyle=fill; ctx.fillRect(x1,y,w,bh);
+      ctx.strokeStyle=str; ctx.strokeRect(x1,y,w,bh);
+      ctx.fillStyle=str; ctx.font='600 9.5px monospace'; ctx.textAlign='right'; ctx.fillText(lbl,x1+w-4,y+11); ctx.textAlign='left';
     };
-    d.obs.forEach(ob=>box(ob.t,ob.top,ob.bot,ob.kind==='bullish'?'rgba(16,185,129,.14)':'rgba(239,68,68,.14)',ob.kind==='bullish'?'#10b981':'#ef4444',`${ob.kind==='bullish'?'Bull':'Bear'} OB`));
-    d.fvgs.forEach(g=>box(g.t,g.top,g.bot,'rgba(56,189,248,.12)','#38bdf8','FVG'));
+    nearObs.forEach(ob=>box(ob.t,ob.top,ob.bot,ob.kind==='bullish'?'rgba(16,185,129,.09)':'rgba(239,68,68,.09)',ob.kind==='bullish'?'rgba(16,185,129,.55)':'rgba(239,68,68,.55)',`${ob.kind==='bullish'?'Demand':'Supply'} OB`));
+    nearFvgs.forEach(g=>box(g.t,g.top,g.bot,'rgba(56,189,248,.08)','rgba(56,189,248,.5)','FVG'));
   };
   chart.timeScale().subscribeVisibleLogicalRangeChange(draw);
   chart.subscribeCrosshairMove(draw);
@@ -596,11 +704,15 @@ function switchTab(id){
   if(id==='coin') loadCoinChart();
 }
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+document.querySelectorAll('#layoutBar button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#layoutBar button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); state.layout=b.dataset.ly; loadCoinChart();
+});
 document.querySelectorAll('#tfBar button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('#tfBar button').forEach(x=>x.classList.remove('active'));
   b.classList.add('active'); state.selectedTf=b.dataset.tf; loadCoinChart();
 });
-document.getElementById('coinSel').onchange = e => { state.selectedCoin = e.target.value; loadCoinChart(); };
+document.getElementById('coinSel').onchange = e => { state.selectedCoin = e.target.value; state.prefSide = null; loadCoinChart(); };
 document.getElementById('rescanBtn').onclick = scanAll;
 ['qSearch','qSort','qEarly'].forEach(id=>document.getElementById(id).oninput=renderAll);
 

@@ -19,7 +19,224 @@ def _fp(val: float | None) -> str:
     return f"{val:.4g}"
 
 
-def build_plain_english_report(symbol: str, tf: str, tf_detail: dict | None, summary: dict | None) -> dict | None:
+def _build_next_move_map(
+    symbol: str,
+    tf_up: str,
+    price: float,
+    ind: dict,
+    st: dict,
+    smc: dict,
+    sr: dict,
+    summary: dict | None,
+    sentiment: dict | None,
+) -> dict:
+    """Compute the rule-based 'What's Likely Next' Scenario Map:
+    1. Confluence Weight Split (Long vs Short)
+    2. #1 Primary Liquidity / Imbalance Magnet
+    3. Scenario A (Bullish Path: Hold/Trigger -> Targets)
+    4. Scenario B (Bearish Path: Reject/Breakdown -> Targets)
+    5. Futures Positioning & Squeeze Read (Funding, OI, Retail vs Top-Trader L/S)
+    """
+    atr = max(float(ind.get("atr14") or (price * 0.01) or 1e-8), 1e-8)
+    l_tech = float((summary or {}).get("long_tech_score") or 0.0)
+    s_tech = float((summary or {}).get("short_tech_score") or 0.0)
+    l_opp = float((summary or {}).get("long_opp_score") or 0.0)
+    s_opp = float((summary or {}).get("short_opp_score") or 0.0)
+
+    status_now = (summary or {}).get("status", "NO SETUP")
+    l_raw = max(1.0, l_tech * 0.60 + l_opp * 0.40)
+    s_raw = max(1.0, s_tech * 0.60 + s_opp * 0.40)
+    bull_pct = round(l_raw / (l_raw + s_raw) * 100.0, 1)
+    bear_pct = round(100.0 - bull_pct, 1)
+    if status_now.startswith("SHORT CONFIRMED") or status_now.startswith("SHORT DEVELOPING") or bear_pct >= 56.0:
+        favored = "BEARISH"
+        lean_label = f"Bearish Path Favored ({status_now} • {bear_pct}% Bear vs {bull_pct}% Bull confluence weight)"
+    elif status_now.startswith("LONG CONFIRMED") or status_now.startswith("LONG DEVELOPING") or bull_pct >= 56.0:
+        favored = "BULLISH"
+        lean_label = f"Bullish Path Favored ({status_now} • {bull_pct}% Bull vs {bear_pct}% Bear confluence weight)"
+    else:
+        favored = "BALANCED"
+        lean_label = f"Balanced / Two-Way Rotational Chop ({bull_pct}% Bull vs {bear_pct}% Bear confluence weight)"
+
+    # Gather real above-price & below-price magnets (EQH/EQL, unfilled FVG, unmitigated OB, PDH/PDL, PWH/PWL, Swings)
+    up_magnets: list[dict] = []
+    dn_magnets: list[dict] = []
+
+    def _add_mag(lvl: float | None, label: str, weight_bonus: float):
+        if lvl is None or lvl <= 0 or price <= 0:
+            return
+        dist_pct = (lvl - price) / price * 100.0
+        dist_atr = abs(lvl - price) / atr
+        if dist_atr < 0.08 or dist_atr > 12.0:
+            return
+        # Closer unfinished liquidity (0.3 - 3.5 ATR) has strongest pull
+        prox_score = max(0.0, 10.0 - dist_atr * 2.0) + weight_bonus
+        entry = {
+            "price": float(lvl),
+            "label": label,
+            "dist_pct": round(dist_pct, 2),
+            "dist_atr": round(dist_atr, 2),
+            "score": round(prox_score, 2),
+        }
+        if lvl > price:
+            up_magnets.append(entry)
+        else:
+            dn_magnets.append(entry)
+
+    for eq in (smc or {}).get("equal_levels", []):
+        if not eq.get("swept"):
+            _add_mag(eq["price"], f"Unswept {eq['kind']} Stop Pool", 5.0)
+    for g in (smc or {}).get("fvgs", []):
+        _add_mag(g["mid"], f"Unfilled {g['kind'].capitalize()} FVG Magnet", 3.8)
+    for o in (smc or {}).get("order_blocks", []):
+        edge = o["bottom"] if o["kind"] == "bearish" else o["top"]
+        _add_mag(edge, f"{'Fresh' if not o.get('mitigated') else 'Active'} {o['kind'].capitalize()} Order Block", 3.5)
+    if sr:
+        _add_mag(sr.get("pdh"), "Previous Day High (PDH Liquidity)", 4.0)
+        _add_mag(sr.get("pdl"), "Previous Day Low (PDL Liquidity)", 4.0)
+        _add_mag(sr.get("pwh"), "Previous Week High (PWH Liquidity)", 3.5)
+        _add_mag(sr.get("pwl"), "Previous Week Low (PWL Liquidity)", 3.5)
+        for sup in sr.get("supports", [])[:3]:
+            _add_mag(sup["price"], f"Swing Support ({sup['source']})", 2.5)
+        for res in sr.get("resistances", [])[:3]:
+            _add_mag(res["price"], f"Swing Resistance ({res['source']})", 2.5)
+    if st:
+        if st.get("last_swing_high"):
+            _add_mag(st["last_swing_high"]["price"], f"Protected Swing High ({st['last_swing_high']['label']})", 3.2)
+        if st.get("last_swing_low"):
+            _add_mag(st["last_swing_low"]["price"], f"Protected Swing Low ({st['last_swing_low']['label']})", 3.2)
+
+    up_magnets.sort(key=lambda x: x["score"], reverse=True)
+    dn_magnets.sort(key=lambda x: x["score"], reverse=True)
+
+    # Pick #1 Primary Magnet biased by confluence direction
+    best_up = up_magnets[0] if up_magnets else None
+    best_dn = dn_magnets[0] if dn_magnets else None
+    if best_up and best_dn:
+        up_eff = best_up["score"] + (2.5 if favored == "BULLISH" else 0.0)
+        dn_eff = best_dn["score"] + (2.5 if favored == "BEARISH" else 0.0)
+        primary_magnet = best_up if up_eff >= dn_eff else best_dn
+    else:
+        primary_magnet = best_up or best_dn
+
+    # Scenario A: Bullish Path
+    bull_obs = [o for o in (smc or {}).get("order_blocks", []) if o["kind"] == "bullish"]
+    last_sl = (st or {}).get("last_swing_low")
+    last_sh = (st or {}).get("last_swing_high")
+    ns = (sr or {}).get("nearest_support")
+    nr = (sr or {}).get("nearest_resistance")
+
+    bull_hold = (
+        f"{_fp(bull_obs[-1]['bottom'])}–{_fp(bull_obs[-1]['top'])} (Bullish OB)"
+        if bull_obs
+        else (f"{_fp(last_sl['price'])} ({last_sl['label']} swing low)" if last_sl else (f"{_fp(ns['price'])} support" if ns else f"{_fp(price - atr)}"))
+    )
+    bull_trigger = (
+        f"a {tf_up} candle close above {_fp(last_sh['price'])} ({last_sh['label']})"
+        if last_sh and last_sh["price"] > price
+        else (f"a clean reclaim & hold above {_fp(nr['price'])}" if nr else "sustained 15m higher-lows + bullish BOS")
+    )
+    up_sorted_price = sorted({round(m["price"], 8): m for m in up_magnets}.values(), key=lambda m: m["price"])
+    bull_targets_str = (
+        " → ".join(f"{_fp(m['price'])} ({m['label']}, +{m['dist_pct']}%)" for m in up_sorted_price[:2])
+        if up_sorted_price
+        else f"{_fp(price + 1.5 * atr)} → {_fp(price + 3.0 * atr)} (ATR expansion projection)"
+    )
+    bull_scenario = (
+        f"If buyers defend {bull_hold} and print {bull_trigger}, expect upside continuation pulling toward {bull_targets_str}."
+    )
+
+    # Scenario B: Bearish Path
+    bear_obs = [o for o in (smc or {}).get("order_blocks", []) if o["kind"] == "bearish"]
+    bear_cap = (
+        f"{_fp(bear_obs[-1]['bottom'])}–{_fp(bear_obs[-1]['top'])} (Bearish Supply OB)"
+        if bear_obs
+        else (f"{_fp(last_sh['price'])} ({last_sh['label']} swing high)" if last_sh else (f"{_fp(nr['price'])} resistance" if nr else f"{_fp(price + atr)}"))
+    )
+    bear_trigger = (
+        f"a {tf_up} candle close below {_fp(last_sl['price'])} ({last_sl['label']})"
+        if last_sl and last_sl["price"] < price
+        else (f"rejection below {bear_cap} + 15m bearish CHoCH" if bear_obs else f"a breakdown below {_fp(ns['price'])}" if ns else "15m lower-high + bearish BOS")
+    )
+    dn_sorted_price = sorted({round(m["price"], 8): m for m in dn_magnets}.values(), key=lambda m: m["price"], reverse=True)
+    bear_targets_str = (
+        " → ".join(f"{_fp(m['price'])} ({m['label']}, {m['dist_pct']}%)" for m in dn_sorted_price[:2])
+        if dn_sorted_price
+        else f"{_fp(price - 1.5 * atr)} → {_fp(price - 3.0 * atr)} (ATR breakdown projection)"
+    )
+    bear_scenario = (
+        f"If price stays capped beneath {bear_cap} or prints {bear_trigger}, expect downside draw toward {bear_targets_str}."
+    )
+
+    # Futures Positioning & Squeeze Read (Funding + OI + Retail vs Top Trader L/S)
+    sent_summary = None
+    sent_metrics: dict = {}
+    if sentiment:
+        fr = sentiment.get("funding_rate_pct")
+        oi = sentiment.get("open_interest")
+        rl = sentiment.get("retail_long_pct")
+        tl = sentiment.get("top_trader_long_pct")
+        basis = sentiment.get("basis_pct")
+
+        if fr is not None:
+            sent_metrics["funding_rate_pct"] = fr
+        if basis is not None:
+            sent_metrics["basis_pct"] = basis
+        if oi:
+            sent_metrics["open_interest_usd"] = round(float(oi) * price, 0)
+        if rl is not None:
+            sent_metrics["retail_long_pct"] = rl
+            sent_metrics["retail_short_pct"] = round(100.0 - rl, 1)
+        if tl is not None:
+            sent_metrics["top_trader_long_pct"] = tl
+            sent_metrics["top_trader_short_pct"] = round(100.0 - tl, 1)
+
+        clues: list[str] = []
+        if fr is not None:
+            if fr >= 0.03:
+                clues.append(f"Elevated positive funding (+{fr:.4f}%): perpetual longs are paying a premium — crowded late longs create downside stop-hunt / long-squeeze risk if support cracks.")
+            elif fr <= -0.015:
+                clues.append(f"Negative funding ({fr:.4f}%): shorts are aggressive and paying longs — high fuel for an explosive short-squeeze if price breaks overhead resistance.")
+            else:
+                clues.append(f"Neutral funding ({'+' if fr >= 0 else ''}{fr:.4f}%): perpetual leverage is balanced without extreme crowding.")
+        if rl is not None:
+            if rl >= 66.0:
+                clues.append(f"Retail Crowd Skew: {rl:.1f}% of accounts are net LONG — contrarian warning to wait for a liquidity sweep rather than chasing green candles.")
+            elif rl <= 38.0:
+                clues.append(f"Retail Crowd Skew: {100.0 - rl:.1f}% of accounts are net SHORT — contrarian fuel supporting upside squeezes.")
+        if rl is not None and tl is not None and abs(tl - rl) >= 7.0:
+            whales_side = "LONG" if tl > rl else "SHORT"
+            clues.append(
+                f"Smart-Money Divergence: Top Binance traders are {tl:.1f}% Long vs Retail at {rl:.1f}% Long (whales leaning {whales_side} relative to the crowd)."
+            )
+        if clues:
+            sent_summary = " ".join(clues)
+
+    return {
+        "favored": favored,
+        "bull_weight_pct": bull_pct,
+        "bear_weight_pct": bear_pct,
+        "lean_label": lean_label,
+        "primary_magnet": (
+            f"{_fp(primary_magnet['price'])} — {primary_magnet['label']} "
+            f"({'+' if primary_magnet['dist_pct'] >= 0 else ''}{primary_magnet['dist_pct']}% / {primary_magnet['dist_atr']} ATR away)"
+            if primary_magnet
+            else "No clean nearby liquidity magnet within 12 ATR"
+        ),
+        "bull_scenario": bull_scenario,
+        "bear_scenario": bear_scenario,
+        "positioning_read": sent_summary,
+        "positioning_metrics": sent_metrics,
+    }
+
+
+def build_plain_english_report(
+    symbol: str,
+    tf: str,
+    tf_detail: dict | None,
+    summary: dict | None,
+    sentiment: dict | None = None,
+) -> dict | None:
     if not tf_detail and not summary:
         return None
 
@@ -333,14 +550,20 @@ def build_plain_english_report(symbol: str, tf: str, tf_detail: dict | None, sum
         plan_bullets = []
         if ez and entry and inv:
             risk_pct = abs(entry - inv) / entry * 100 if entry else 0.0
+            entry_why = plan.get("entry_reason") or plan.get("zone_source", "Structural Zone")
+            ord_why = plan.get("order_type") or f"{side} Execution"
+            inv_why = plan.get("invalidation_reason") or "0.25 ATR beyond structural swing/zone"
+            t_details = plan.get("target_details") or []
             plan_bullets.append(
-                f"Primary {side} Entry Zone ({plan.get('zone_source', 'Structural')}): {_fp(ez[0])} to {_fp(ez[1])} "
-                f"(Suggested Execution Reference: {_fp(entry)})."
+                f"How Entry Is Set ({entry_why}): Zone {_fp(ez[0])} – {_fp(ez[1])} → Suggested Entry {_fp(entry)} ({ord_why})."
             )
             plan_bullets.append(
-                f"Structural Invalidation (Hard Stop-Loss): {_fp(inv)} ({risk_pct:.2f}% risk from entry — if price crosses this level, the {side.lower()} market structure thesis is mathematically proven wrong)."
+                f"How Stop-Loss Is Set ({inv_why}): Hard Invalidation at {_fp(inv)} ({risk_pct:.2f}% risk from entry — crossing this level breaks the {side.lower()} market structure)."
             )
-            if tgts:
+            if t_details:
+                t_str = " → ".join(f"TP{i + 1}: {_fp(td['price'])} [{td['source']}, {td['rr']}R]" for i, td in enumerate(t_details))
+                plan_bullets.append(f"How Targets Are Set (Opposing Liquidity / S/R / OBs spaced ≥ 0.4 ATR): {t_str}.")
+            elif tgts:
                 t_str = " → ".join(f"TP{i + 1}: {_fp(t)}" for i, t in enumerate(tgts))
                 plan_bullets.append(f"Structural Profit Targets: {t_str} (Estimated Risk/Reward: {rr}R).")
             else:
@@ -371,10 +594,23 @@ def build_plain_english_report(symbol: str, tf: str, tf_detail: dict | None, sum
             "bullets": plan_bullets,
         })
 
+    next_move_map = _build_next_move_map(
+        symbol=symbol,
+        tf_up=tf_up,
+        price=price,
+        ind=ind,
+        st=st,
+        smc=smc,
+        sr=sr,
+        summary=summary,
+        sentiment=sentiment,
+    )
+
     return {
         "symbol": symbol,
         "tf": tf,
         "tone": tone,
         "headline": headline,
+        "next_move_map": next_move_map,
         "sections": sections,
     }

@@ -84,6 +84,78 @@ class BrowserBinanceBridge {
     this.forceBurst = true;
   }
 
+  async syncSymbolSentiment(symbol: string, tf: string = '1h'): Promise<boolean> {
+    if (!this.spec) {
+      this.spec = await this.pickWorkingEndpoint();
+    }
+    if (!this.spec || this.spec.kind !== 'futures') return false;
+    const fapiOrigin = this.spec.rest.replace(/\/fapi\/v1$/, '');
+    const period = ['5m', '15m', '1h', '4h', '1d'].includes(tf) ? tf : '1h';
+    const data: Record<string, number> = {};
+
+    await Promise.all([
+      (async () => {
+        try {
+          const r = await fetch(`${this.spec!.rest}/premiumIndex?symbol=${encodeURIComponent(symbol)}`);
+          if (r.ok) {
+            const d = await r.json();
+            const mark = parseFloat(d.markPrice || '0');
+            const idx = parseFloat(d.indexPrice || '0');
+            data.funding_rate_pct = +(parseFloat(d.lastFundingRate || '0') * 100).toFixed(4);
+            data.mark_price = mark;
+            data.index_price = idx;
+            data.basis_pct = idx > 0 ? +(((mark - idx) / idx) * 100).toFixed(4) : 0;
+          }
+        } catch {}
+      })(),
+      (async () => {
+        try {
+          const r = await fetch(`${this.spec!.rest}/openInterest?symbol=${encodeURIComponent(symbol)}`);
+          if (r.ok) {
+            const d = await r.json();
+            data.open_interest = parseFloat(d.openInterest || '0');
+          }
+        } catch {}
+      })(),
+      (async () => {
+        try {
+          const r = await fetch(
+            `${fapiOrigin}/futures/data/globalLongShortAccountRatio?symbol=${encodeURIComponent(symbol)}&period=${period}&limit=2`
+          );
+          if (r.ok) {
+            const arr = await r.json();
+            if (Array.isArray(arr) && arr.length) {
+              const last = arr[arr.length - 1];
+              data.retail_long_pct = +(parseFloat(last.longAccount || '0') * 100).toFixed(1);
+              data.retail_short_pct = +(parseFloat(last.shortAccount || '0') * 100).toFixed(1);
+            }
+          }
+        } catch {}
+      })(),
+      (async () => {
+        try {
+          const r = await fetch(
+            `${fapiOrigin}/futures/data/topLongShortPositionRatio?symbol=${encodeURIComponent(symbol)}&period=${period}&limit=2`
+          );
+          if (r.ok) {
+            const arr = await r.json();
+            if (Array.isArray(arr) && arr.length) {
+              const last = arr[arr.length - 1];
+              data.top_trader_long_pct = +(parseFloat(last.longAccount || '0') * 100).toFixed(1);
+              data.top_trader_short_pct = +(parseFloat(last.shortAccount || '0') * 100).toFixed(1);
+            }
+          }
+        } catch {}
+      })(),
+    ]);
+
+    if (Object.keys(data).length > 0) {
+      await apiSend('/api/bridge/sentiment', 'POST', { symbol, data });
+      return true;
+    }
+    return false;
+  }
+
   async syncSingleSymbolNow(symbol: string): Promise<boolean> {
     if (!this.spec) {
       this.spec = await this.pickWorkingEndpoint();
@@ -91,14 +163,23 @@ class BrowserBinanceBridge {
     if (!this.spec) return false;
     const tfs = ['5m', '15m', '1h', '4h', '1d', '1w'];
     const frames: Record<string, unknown[][]> = {};
-    await Promise.all(
-      tfs.map(async (tf) => {
-        try {
-          const r = await fetch(`${this.spec!.rest}/klines?symbol=${encodeURIComponent(symbol)}&interval=${tf}&limit=300`);
-          if (r.ok) frames[tf] = await r.json();
-        } catch {}
-      })
-    );
+    await Promise.all([
+      ...tfs.map(async (tf) => {
+        const lim = tf === '1d' || tf === '1w' ? 99 : 300;
+        const url = `${this.spec!.rest}/klines?symbol=${encodeURIComponent(symbol)}&interval=${tf}&limit=${lim}`;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const r = await fetch(url);
+            if (r.ok) {
+              frames[tf] = await r.json();
+              break;
+            }
+          } catch {}
+          await new Promise((res) => setTimeout(res, 200));
+        }
+      }),
+      this.syncSymbolSentiment(symbol, '1h'),
+    ]);
     if (Object.keys(frames).length > 0) {
       await apiSend('/api/bridge/klines', 'POST', {
         symbol,
@@ -323,9 +404,9 @@ class BrowserBinanceBridge {
           continue;
         }
 
-        // Process up to 4 symbols concurrently per batch across ALL Binance USDT perpetual contracts (safe inside rate limits)
+        // Process 3 symbols concurrently per batch across ALL Binance USDT perpetual contracts (safe inside rate limits)
         const ep = this.spec;
-        const workerCount = 4;
+        const workerCount = 3;
         let idx = 0;
         const workers = Array.from({ length: Math.min(workerCount, plan.jobs.length) }, async () => {
           while (idx < plan.jobs.length && !this.stopped) {
@@ -340,12 +421,16 @@ class BrowserBinanceBridge {
                   limit: String(q.limit),
                 });
                 if (q.start_time) params.set('startTime', String(q.start_time));
-                try {
-                  const r = await fetch(`${ep.rest}/klines?${params.toString()}`);
-                  if (r.ok) {
-                    frames[q.tf] = await r.json();
-                  }
-                } catch {}
+                for (let attempt = 0; attempt < 2; attempt++) {
+                  try {
+                    const r = await fetch(`${ep.rest}/klines?${params.toString()}`);
+                    if (r.ok) {
+                      frames[q.tf] = await r.json();
+                      break;
+                    }
+                  } catch {}
+                  await new Promise((res) => setTimeout(res, 180));
+                }
               })
             );
             if (Object.keys(frames).length > 0) {

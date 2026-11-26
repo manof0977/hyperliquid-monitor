@@ -41,6 +41,8 @@ class ScannerEngine:
         self.bridge_last_ts: int | None = None
         self._on_demand_requests: list[dict] = []  # queued (symbol, tf) requests for browser bridge
         self._last_tf_sync: dict[tuple[str, str], int] = {}
+        self.funding_cache: dict[str, dict] = {}
+        self.sentiment_cache: dict[str, dict] = {}
 
     async def start(self):
         self._stop.clear()
@@ -112,6 +114,10 @@ class ScannerEngine:
                 for sym, t in tickers.items():
                     if sym in self.symbols_meta:
                         self.tickers[sym] = t
+                try:
+                    self.funding_cache.update(await self.client.fetch_premium_index_all())
+                except Exception:
+                    pass
 
                 # Rank by 24h USDT quote volume so liquid contracts are scanned first; scan_limit <= 0 scans ALL coins
                 ranked = sorted(
@@ -226,7 +232,7 @@ class ScannerEngine:
 
     async def analyze_one(self, symbol: str, sync_network: bool = True) -> dict | None:
         frames = await self.ensure_symbol_frames(symbol, sync_network=sync_network)
-        if not frames:
+        if not frames or "1h" not in frames:
             return None
         prev = self.results.get(symbol)
         prev_status = prev.get("status") if prev else None
@@ -336,14 +342,44 @@ class ScannerEngine:
                 "div": tf_detail["div"],
             }
         summary = self.results.get(symbol)
+        sentiment = await self._get_symbol_sentiment(symbol, tf)
         return {
             "symbol": symbol,
             "tf": tf,
             "candles": candles,
             "overlays": overlays,
             "summary": summary,
-            "explanation": build_plain_english_report(symbol, tf, tf_detail, summary),
+            "sentiment": sentiment,
+            "explanation": build_plain_english_report(symbol, tf, tf_detail, summary, sentiment=sentiment),
         }
+
+    async def _get_symbol_sentiment(self, symbol: str, tf: str) -> dict | None:
+        now_ms = int(time.time() * 1000)
+        cached = self.sentiment_cache.get(symbol)
+        if self.client.connected and (not cached or (now_ms - cached.get("_ts", 0)) > 180_000):
+            try:
+                fresh = await self.client.fetch_symbol_sentiment(symbol, period=tf)
+                fresh["_ts"] = now_ms
+                self.sentiment_cache[symbol] = fresh
+                cached = fresh
+            except Exception:
+                pass
+        merged: dict = {}
+        if symbol in self.funding_cache:
+            merged.update(self.funding_cache[symbol])
+        if cached:
+            merged.update({k: v for k, v in cached.items() if k != "_ts"})
+        return merged if merged else None
+
+    async def ingest_bridge_sentiment(self, symbol: str, data: dict):
+        symbol = symbol.upper()
+        now_ms = int(time.time() * 1000)
+        if "funding_rate_pct" in data or "mark_price" in data:
+            self.funding_cache[symbol] = {
+                k: data[k] for k in ("funding_rate_pct", "mark_price", "index_price", "basis_pct", "next_funding_time") if k in data
+            }
+        entry = {**(self.sentiment_cache.get(symbol) or {}), **data, "_ts": now_ms}
+        self.sentiment_cache[symbol] = entry
 
     # ---------- Browser-Direct Real Binance Bridge Ingestion ----------
     def queue_bridge_symbol(self, symbol: str):

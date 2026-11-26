@@ -137,6 +137,74 @@ class BinanceFuturesClient:
             }
         return out
 
+    async def fetch_premium_index_all(self) -> dict[str, dict]:
+        """Fetch live funding rate + mark/index basis across all USDⓈ-M contracts in a single call."""
+        data = await self._get("/fapi/v1/premiumIndex", weight=10)
+        out: dict[str, dict] = {}
+        if not isinstance(data, list):
+            return out
+        for item in data:
+            sym = item.get("symbol")
+            if not sym:
+                continue
+            mark = float(item.get("markPrice", 0) or 0)
+            idx = float(item.get("indexPrice", 0) or 0)
+            fr = float(item.get("lastFundingRate", 0) or 0) * 100.0  # convert to %
+            basis_pct = ((mark - idx) / idx * 100.0) if idx > 0 else 0.0
+            out[sym] = {
+                "funding_rate_pct": round(fr, 4),
+                "mark_price": mark,
+                "index_price": idx,
+                "basis_pct": round(basis_pct, 4),
+                "next_funding_time": int(item.get("nextFundingTime", 0) or 0),
+            }
+        return out
+
+    async def fetch_symbol_sentiment(self, symbol: str, period: str = "1h") -> dict:
+        """Fetch live Open Interest + Retail Global L/S Account Ratio + Top-Trader L/S Position Ratio."""
+        p = period if period in ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d") else "1h"
+        out: dict = {"symbol": symbol}
+
+        async def _oi():
+            try:
+                d = await self._get("/fapi/v1/openInterest", params={"symbol": symbol}, weight=1)
+                out["open_interest"] = float(d.get("openInterest", 0) or 0)
+            except Exception:
+                pass
+
+        async def _global_ls():
+            try:
+                arr = await self._get(
+                    "/futures/data/globalLongShortAccountRatio",
+                    params={"symbol": symbol, "period": p, "limit": 2},
+                    weight=1,
+                )
+                if isinstance(arr, list) and arr:
+                    last = arr[-1]
+                    out["retail_long_pct"] = round(float(last.get("longAccount", 0) or 0) * 100.0, 1)
+                    out["retail_short_pct"] = round(float(last.get("shortAccount", 0) or 0) * 100.0, 1)
+                    out["retail_ls_ratio"] = round(float(last.get("longShortRatio", 1) or 1), 2)
+            except Exception:
+                pass
+
+        async def _top_ls():
+            try:
+                arr = await self._get(
+                    "/futures/data/topLongShortPositionRatio",
+                    params={"symbol": symbol, "period": p, "limit": 2},
+                    weight=1,
+                )
+                if isinstance(arr, list) and arr:
+                    last = arr[-1]
+                    out["top_trader_long_pct"] = round(float(last.get("longAccount", 0) or 0) * 100.0, 1)
+                    out["top_trader_short_pct"] = round(float(last.get("shortAccount", 0) or 0) * 100.0, 1)
+                    out["top_trader_ls_ratio"] = round(float(last.get("longShortRatio", 1) or 1), 2)
+            except Exception:
+                pass
+
+        await asyncio.gather(_oi(), _global_ls(), _top_ls())
+        return out
+
     async def fetch_klines(
         self, symbol: str, interval: str, limit: int = 300, start_time: int | None = None
     ) -> list[tuple]:

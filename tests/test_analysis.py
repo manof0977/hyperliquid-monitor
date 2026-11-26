@@ -100,9 +100,59 @@ def test_plain_english_report_generation():
     summary = analyze_symbol({tf: df for tf in ("5m", "15m", "1h", "4h", "1d", "1w")})
     summary["price"] = float(df["close"].iloc[-1])
     summary["change_24h"] = 2.35
-    rep = build_plain_english_report("BTCUSDT", "1h", tf_detail, summary)
+    sentiment = {
+        "funding_rate_pct": -0.025,
+        "basis_pct": -0.08,
+        "open_interest": 12500.0,
+        "retail_long_pct": 38.0,
+        "retail_short_pct": 62.0,
+        "top_trader_long_pct": 59.0,
+        "top_trader_short_pct": 41.0,
+    }
+    rep = build_plain_english_report("BTCUSDT", "1h", tf_detail, summary, sentiment=sentiment)
     assert rep is not None
     assert rep["symbol"] == "BTCUSDT"
     assert len(rep["sections"]) == 6
     assert "BTCUSDT" in rep["headline"]
+    nm = rep["next_move_map"]
+    assert nm["bull_weight_pct"] + nm["bear_weight_pct"] == 100
+    assert nm["favored"] in ("BULLISH", "BEARISH", "BALANCED")
+    assert nm["primary_magnet"]
+    assert nm["bull_scenario"] and nm["bear_scenario"]
+    assert nm["positioning_read"] and "negative funding" in nm["positioning_read"].lower()
+    assert "smart-money divergence" in nm["positioning_read"].lower()
+
+
+def test_short_and_long_plan_directional_consistency():
+    bull_df = _make_trend_df(160, 1)
+    bear_df = _make_trend_df(160, -1)
+
+    bull_res = analyze_symbol({tf: bull_df for tf in ("5m", "15m", "1h", "4h", "1d", "1w")})
+    bear_res = analyze_symbol({tf: bear_df for tf in ("5m", "15m", "1h", "4h", "1d", "1w")})
+
+    bull_cur = float(bull_df["close"].iloc[-1])
+    bear_cur = float(bear_df["close"].iloc[-1])
+
+    lp = bull_res["long_plan"]
+    if lp["has_plan"]:
+        assert lp["entry"] <= bull_cur
+        assert lp["invalidation"] < lp["entry"]
+        assert all(t > lp["entry"] for t in lp["targets"])
+        assert lp["entry_reason"] and lp["invalidation_reason"] and lp["order_type"]
+
+    sp = bear_res["short_plan"]
+    if sp["has_plan"]:
+        assert sp["entry"] >= bear_cur
+        assert sp["invalidation"] > sp["entry"]
+        assert all(t < sp["entry"] for t in sp["targets"])
+        assert sp["entry_reason"] and sp["invalidation_reason"] and sp["order_type"]
+
+    if bear_res["status"].startswith("SHORT"):
+        assert bear_res["active_side"] == "SHORT"
+        assert bear_res["entry"] == sp["entry"]
+        assert bear_res["invalidation"] > bear_res["entry"]
+    if bull_res["status"].startswith("LONG"):
+        assert bull_res["active_side"] == "LONG"
+        assert bull_res["entry"] == lp["entry"]
+        assert bull_res["invalidation"] < bull_res["entry"]
 
